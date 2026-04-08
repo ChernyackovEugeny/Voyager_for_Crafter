@@ -1,0 +1,25 @@
+# Crafter environment
+crafter
+
+# LLM API (DeepSeek via OpenAI-compatible API)
+openai
+
+# Vector DB for skill library
+chromadb
+
+# Embeddings (all-MiniLM-L6-v2, local)
+sentence-transformers
+
+# Numerical operations
+numpy
+
+# Environment config (.env loading)
+python-dotenv
+
+# Token counting / cost estimation
+tiktoken
+
+# RL environment interface
+gymnasium
+
+shimmy
