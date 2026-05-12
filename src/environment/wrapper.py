@@ -21,6 +21,8 @@ class CrafterEnv:
         self._env = crafter.Env(**kwargs)
         self.action_space = self._env.action_space
         self.observation_space = self._env.observation_space
+        view = getattr(self._env, "_view", (9, 9))
+        self.view_size = (int(view[0]), int(view[1]))
 
     def reset(self):
         """Returns: obs (np.ndarray)"""
@@ -34,9 +36,11 @@ class CrafterEnv:
             reward      (float)
             terminated  (bool) — episode ended naturally (death / time limit)
             truncated   (bool) — always False (crafter has no truncation)
-            info        (dict) — achievements, inventory, health, semantic, player_pos
+            info        (dict) — achievements, inventory, health, semantic,
+                                  player_pos, view_size
         """
         obs, reward, done, info = self._env.step(action)
+        info["view_size"] = self.view_size
         return obs, reward, bool(done), False, info
 
     def close(self):

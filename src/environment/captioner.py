@@ -3,6 +3,7 @@ import numpy as np
 import crafter.constants as C
 
 from environment.ids import ID_TO_NAME as _ID_TO_NAME
+from environment.view import visible_semantic_window
 
 # Background tiles not worth mentioning every step
 _BACKGROUND: frozenset[str] = frozenset({"grass", "path", "player"})
@@ -38,7 +39,7 @@ def caption(obs: np.ndarray, info: dict) -> str:
 # -----------------------------------------------------------------------
 
 def _observation_line(info: dict) -> str:
-    semantic: np.ndarray = info.get("semantic", np.zeros((1, 1), dtype=int))
+    semantic, _ = visible_semantic_window(info)
     unique_ids = np.unique(semantic)
     visible = sorted(
         _ID_TO_NAME[uid]
