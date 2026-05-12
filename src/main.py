@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 
 from agent.agent import Agent
+from agent.executor import Executor
 from analytics.log_utils import log_session_finalize
 from analytics.run_logger import RunLogger
 from config import get_settings
@@ -31,7 +32,11 @@ def main() -> None:
     log.info("voyager-crafter starting up")
 
     env = CrafterEnv(**settings.environment.crafter_kwargs)
-    agent = Agent(env)
+    executor = Executor(
+        max_steps_per_skill=settings.executor.max_steps_per_skill,
+        health_threshold=settings.executor.health_interrupt_threshold,
+    )
+    agent = Agent(env, executor)
 
     with RunLogger(config_snapshot=settings.snapshot()) as run_log:
         log.info("running one episode (session=%s)", run_log.session_id)

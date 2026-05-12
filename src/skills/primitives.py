@@ -9,9 +9,8 @@ Design decisions:
   - go_to is a sub-generator (uses yield + return state). Skills call it as:
         state = yield from go_to(coords, state)
     The return value is captured by `yield from` via Python 3.3+ StopIteration.value.
-  - Memory is held in a module-level `_memory` variable. The agent calls
-    set_memory(agent.memory) before executing any skill. This keeps primitives.py
-    free of imports from the rest of the project.
+  - Spatial memory primitives are injected by skills.runner.SkillRuntime.
+    This module keeps action/navigation primitives only.
   - All action-index constants are pre-computed at module load from
     crafter.constants — no magic numbers, no per-call .index() overhead.
   - ID tables (_NAME_TO_ID, WALKABLE_IDS) are shared with captioner.py via
@@ -29,8 +28,7 @@ from environment.ids import NAME_TO_ID as _NAME_TO_ID, WALKABLE_IDS as _WALKABLE
 from environment.view import visible_semantic_window
 
 
-# Single source of truth for primitive calls available to generated skills.
-PRIMITIVE_NAMES: frozenset[str] = frozenset({
+ACTION_PRIMITIVE_NAMES: frozenset[str] = frozenset({
     "move_left",
     "move_right",
     "move_up",
@@ -42,12 +40,17 @@ PRIMITIVE_NAMES: frozenset[str] = frozenset({
     "find_nearest",
     "go_to",
     "get_position",
+})
+
+MEMORY_PRIMITIVE_NAMES: frozenset[str] = frozenset({
     "get_memory",
     "save_in_memory",
     "delete_memory",
     "set_home",
     "get_home",
 })
+
+PRIMITIVE_NAMES: frozenset[str] = ACTION_PRIMITIVE_NAMES | MEMORY_PRIMITIVE_NAMES
 
 
 # ---------------------------------------------------------------------------
@@ -84,19 +87,6 @@ _DIR_TO_ACTION: dict[tuple[int, int], int] = {
 _DIRS = list(_DIR_TO_ACTION.keys())
 
 _MAP_W, _MAP_H = 64, 64  # fixed world size (crafter default area)
-
-
-# ---------------------------------------------------------------------------
-# Module-level memory (set by agent before each skill execution)
-# ---------------------------------------------------------------------------
-
-_memory = None   # SpatialMemory instance, injected via set_memory()
-
-
-def set_memory(mem) -> None:
-    """Bind the agent's SpatialMemory instance. Called once per episode start."""
-    global _memory
-    _memory = mem
 
 
 # ---------------------------------------------------------------------------
@@ -287,32 +277,3 @@ def go_to(target_coords: tuple, state: dict):
         # Path exhausted but not arrived → replan (outer loop).
 
     return state  # gave up after MAX_REPLANS
-
-
-# ---------------------------------------------------------------------------
-# Spatial memory wrappers (delegate to the SpatialMemory instance)
-# ---------------------------------------------------------------------------
-
-def get_memory() -> dict:
-    """Return a copy of the spatial memory dict: {obj_name: (x, y)}."""
-    return _memory.get_memory()
-
-
-def save_in_memory(obj: str, coords: tuple) -> None:
-    """Save or overwrite a named location in spatial memory."""
-    _memory.memory_add(obj, coords)
-
-
-def delete_memory(obj: str) -> None:
-    """Remove a named location. Raises KeyError if not present."""
-    _memory.memory_delete(obj)
-
-
-def set_home(coords: tuple) -> None:
-    """Save the home base coordinates."""
-    _memory.set_home(coords)
-
-
-def get_home() -> tuple | None:
-    """Return home coordinates, or None if not set."""
-    return _memory.get_home()

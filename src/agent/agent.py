@@ -1,40 +1,40 @@
-from agent.executor import Executor
+from agent.executor import Executor, InterruptReason
 from agent.memory import SpatialMemory
 
 
 class Agent:
-    def __init__(self, env):
+    """Minimal episode runner. Full task/skill integration lands next."""
+
+    def __init__(self, env, executor: Executor):
         self.env = env
-        self.executor = Executor(env)
+        self.executor = executor
         self.current_task = None
         self.current_skill = None
         self.memory = SpatialMemory()
 
     def run(self):
-        """Прогон одного эпизода."""
+        """Run one episode using the current stub skill selector."""
         self.memory.reset()
-        obs = self.env.reset()
-        info = {}
-        done = False
+        state, done = self._initial_state()
         while not done:
-            done, obs, info = self.step(obs, info)
+            done, state = self.step(state)
 
-    def step(self, obs, info) -> tuple:
-        """
-        Выполняет один skill.
-        Возвращает (done, obs, info) — финальное состояние после завершения skill.
-        obs и info можно передать в reflection на уровне вызывающего кода.
-        """
-        state = {"obs": obs, "info": info}
+    def step(self, state: dict) -> tuple[bool, dict]:
+        """Run one selected skill and return (episode_done, final_state)."""
         skill_func = self._select_skill(state)
-        reason, obs, info = self.executor.run(skill_func, state)
-        if reason == "error":
+        result = self.executor.run(skill_func, self.env, state)
+        if result.reason == InterruptReason.ERROR:
             print(f"[Agent] skill failed: {self.current_skill}")
-        done = (reason == "done")
-        return done, obs, info
+        done = result.reason == InterruptReason.EPISODE_DONE
+        return done, result.final_state
+
+    def _initial_state(self) -> tuple[dict, bool]:
+        obs = self.env.reset()
+        obs, _, terminated, truncated, info = self.env.step(0)
+        return {"obs": obs, "info": info}, bool(terminated or truncated)
 
     def _select_skill(self, state):
-        """Заглушка: возвращает noop-skill. Позже — поиск в библиотеке или codegen."""
+        """Stub: later this will retrieve or generate a task-specific skill."""
         def noop_skill(state):
-            yield 0  # action 0 = noop
+            yield 0
         return noop_skill

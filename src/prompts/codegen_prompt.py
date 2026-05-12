@@ -228,7 +228,8 @@ Skills are Python generator functions. The executor drives them like this:
 
   action = next(generator)          # get the first action
   while True:
-      obs, reward, done, _, info = env.step(action)
+      obs, reward, terminated, truncated, info = env.step(action)
+      done = terminated or truncated
       state = {"obs": obs, "info": info}
       action = generator.send(state) # send updated state, get next action
 
