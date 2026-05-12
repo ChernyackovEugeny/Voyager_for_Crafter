@@ -1,12 +1,15 @@
-import gymnasium as gym
-from shimmy import GymV21CompatibilityV0
 import crafter
 
-env = GymV21CompatibilityV0(env_id='CrafterReward-v1')
-obs, info = env.reset()
+# crafter uses old gym API: reset() -> obs, step() -> (obs, reward, done, info)
+raw_env = crafter.Env()
 
-action = env.action_space.sample()
-obs, reward, terminated, truncated, info = env.step(action)
+obs = raw_env.reset()
+action = raw_env.action_space.sample()
+obs, reward, done, info = raw_env.step(action)
+
+# adapt to gymnasium-style (terminated/truncated)
+terminated = bool(done)
+truncated = False
 
 print('+++++++++++++++++++++++++++')
 print(obs)
