@@ -72,6 +72,33 @@ class TestSkillLoader(unittest.TestCase):
         action = next(func({}))
         self.assertIsInstance(action, int)
 
+    def test_yield_from_action_primitive_rejected(self):
+        src = (
+            "def bad_move(state):\n"
+            "    state = yield from move_right()\n"
+        )
+        with self.assertRaises(SkillLoadError) as ctx:
+            load_skill(src)
+        self.assertIn("yield from move_right", str(ctx.exception))
+
+    def test_yield_from_go_to_allowed(self):
+        src = (
+            "def navigate(state):\n"
+            "    state = yield from go_to((1, 1), state)\n"
+        )
+        name, func = load_skill(src)
+        self.assertEqual(name, "navigate")
+        self.assertTrue(callable(func))
+
+    def test_yield_from_explore_for_allowed(self):
+        src = (
+            "def explore(state):\n"
+            "    coords, state = yield from explore_for('water', state)\n"
+        )
+        name, func = load_skill(src)
+        self.assertEqual(name, "explore")
+        self.assertTrue(callable(func))
+
     def test_memory_primitives_require_runtime(self):
         src = (
             "def remember(state):\n"

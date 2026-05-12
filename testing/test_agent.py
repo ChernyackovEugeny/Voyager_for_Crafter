@@ -102,6 +102,10 @@ class FakeExecutor:
         self.complete = complete
         self.reason = reason
         self.calls = []
+        self.render_state_calls = 0
+
+    def render_state(self, env):
+        self.render_state_calls += 1
 
     def run(self, skill, env, initial_state):
         self.calls.append((skill, initial_state))
@@ -190,7 +194,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(summary["iterations"], 1)
         self.assertEqual(len(codegen.calls), 1)
         self.assertEqual(manager.saved[0]["name"], "collect_wood")
-        self.assertEqual(manager.successes, [])
+        self.assertEqual(manager.successes, ["collect_wood"])
         self.assertEqual(manager.failures, [])
 
     def test_reuses_high_similarity_skill_and_records_success(self):

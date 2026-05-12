@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Sequence
-
 import chromadb
 import numpy as np
 from chromadb.config import Settings as ChromaClientSettings
@@ -109,6 +107,86 @@ class ChromaSkillRepository:
             result["metadatas"][0],
         )
 
+    def list_skills(self) -> list[SkillRecord]:
+        """Return all skills in this collection, sorted by name."""
+        result = self._collection.get(include=["metadatas", "documents"])
+        skills = [
+            self._from_metadata(name, document, meta)
+            for name, document, meta in zip(
+                result["ids"],
+                result["documents"],
+                result["metadatas"],
+            )
+        ]
+        return sorted(skills, key=lambda skill: skill.name)
+
+    def delete(self, name: str) -> bool:
+        """Delete one skill. Returns False if it was not present."""
+        if self.get(name) is None:
+            return False
+        self._collection.delete(ids=[name])
+        return True
+
+    def export_entries(self) -> list[dict]:
+        """Return JSON-serializable records including embeddings."""
+        result = self._collection.get(
+            include=["metadatas", "documents", "embeddings"],
+        )
+        embeddings = result.get("embeddings")
+        if embeddings is None:
+            embeddings = [None] * len(result["ids"])
+        entries = []
+        for name, document, meta, embedding in zip(
+            result["ids"],
+            result["documents"],
+            result["metadatas"],
+            embeddings,
+        ):
+            entries.append({
+                "name": name,
+                "description": document,
+                "metadata": dict(meta),
+                "embedding": (
+                    np.asarray(embedding, dtype=np.float32).tolist()
+                    if embedding is not None else None
+                ),
+            })
+        return sorted(entries, key=lambda entry: entry["name"])
+
+    def import_entries(self, entries: list[dict], *, overwrite: bool = False) -> int:
+        """Import entries produced by export_entries(). Returns inserted count."""
+        inserted = 0
+        for entry in entries:
+            name = entry["name"]
+            if self.get(name) is not None:
+                if not overwrite:
+                    continue
+                self._collection.delete(ids=[name])
+
+            embedding = entry.get("embedding")
+            if embedding is None:
+                continue
+            self._collection.add(
+                ids=[name],
+                embeddings=[np.asarray(embedding, dtype=np.float32).tolist()],
+                documents=[entry["description"]],
+                metadatas=[entry["metadata"]],
+            )
+            inserted += 1
+        return inserted
+
+    def count(self) -> int:
+        return int(self._collection.count())
+
+    def list_collections(self) -> list[str]:
+        return sorted(
+            collection.name if hasattr(collection, "name") else str(collection)
+            for collection in self._client.list_collections()
+        )
+
+    def delete_collection(self, name: str) -> None:
+        self._client.delete_collection(name)
+
     def update_metrics(
         self,
         name: str,
@@ -128,6 +206,14 @@ class ChromaSkillRepository:
         self._collection.update(
             ids=[name],
             metadatas=[self._to_metadata(existing)],
+        )
+
+    def update_embedding(self, name: str, embedding: np.ndarray) -> None:
+        if self.get(name) is None:
+            raise KeyError(f"skill {name!r} not in library")
+        self._collection.update(
+            ids=[name],
+            embeddings=[embedding.astype(np.float32).tolist()],
         )
 
     def all_embeddings(self) -> tuple[list[str], np.ndarray]:

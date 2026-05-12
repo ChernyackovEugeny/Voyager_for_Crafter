@@ -4,8 +4,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import logging
+import time
 import traceback as tb_mod
 from typing import Any, Callable
+
+from environment.render_viewer import RenderViewer
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +34,23 @@ class ExecutionResult:
 class Executor:
     """Runs one generated skill until completion or a hard interrupt."""
 
-    def __init__(self, *, max_steps_per_skill: int, health_threshold: int) -> None:
+    def __init__(
+        self,
+        *,
+        max_steps_per_skill: int,
+        health_threshold: int,
+        render: bool = False,
+        render_size: int = 512,
+        render_delay_s: float = 0.05,
+        render_viewer=None,
+    ) -> None:
         self._max_steps = max_steps_per_skill
         self._health_threshold = health_threshold
+        self._render = render
+        self._render_size = render_size
+        self._render_delay_s = render_delay_s
+        self._render_viewer = render_viewer
+        self._render_warning_logged = False
 
     def run(
         self,
@@ -58,6 +75,7 @@ class Executor:
                 total_reward += float(reward)
                 info = dict(info)
                 state = {"obs": obs, "info": info}
+                self._render_frame(env)
 
                 if done:
                     return self._make_result(
@@ -147,3 +165,28 @@ class Executor:
         if "health" in inventory:
             return int(inventory["health"])
         return int(info.get("health", 99))
+
+    def _render_frame(self, env) -> None:
+        if not self._render:
+            return
+        render = getattr(env, "render", None)
+        if render is None:
+            if not self._render_warning_logged:
+                logger.warning("executor: render requested but env has no render()")
+                self._render_warning_logged = True
+            return
+        frame = render(size=self._render_size)
+        self._display_frame(frame)
+        if self._render_delay_s > 0:
+            time.sleep(self._render_delay_s)
+
+    def render_state(self, env) -> None:
+        """Render the current environment state outside of the step loop."""
+        self._render_frame(env)
+
+    def _display_frame(self, frame) -> None:
+        if frame is None:
+            return
+        if self._render_viewer is None:
+            self._render_viewer = RenderViewer()
+        self._render_viewer.show(frame)

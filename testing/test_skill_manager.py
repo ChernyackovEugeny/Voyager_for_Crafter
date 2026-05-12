@@ -115,6 +115,19 @@ class SkillManagerTests(unittest.TestCase):
         self.manager.save(name="wood", code="def f(state): yield 0", task="collect wood")
         self.assertTrue(self.manager.exists("wood"))
 
+    def test_repository_list_count_and_delete(self):
+        self.manager.save(name="wood", code="def f(state): yield 0", task="collect wood")
+        self.manager.save(name="stone", code="def f(state): yield 0", task="mine stone")
+
+        self.assertEqual(self.repo.count(), 2)
+        self.assertEqual(
+            [skill.name for skill in self.repo.list_skills()],
+            ["stone", "wood"],
+        )
+        self.assertTrue(self.repo.delete("wood"))
+        self.assertFalse(self.repo.delete("missing"))
+        self.assertEqual(self.repo.count(), 1)
+
     def test_missing_metric_update_logs_and_does_not_raise(self):
         with self.assertLogs("skills.skill_manager", level="WARNING") as logs:
             self.manager.record_failure("missing")

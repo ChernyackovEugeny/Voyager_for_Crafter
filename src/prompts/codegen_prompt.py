@@ -166,6 +166,13 @@ All primitives below are available in every skill function without imports.
                    "lava", "coal", "iron", "diamond", "table", "furnace"
         objects:   "cow", "zombie", "skeleton", "arrow", "plant"
 
+  explore_for(object_type: str, state: dict, max_steps: int = 80) -> Generator
+      Expanding-spiral exploration until object_type becomes visible.
+      This is a sub-generator. ALWAYS call it with `yield from`:
+          coords, state = yield from explore_for("water", state, max_steps=120)
+      It returns (coords, updated_state). coords is None if the object was not
+      found within max_steps.
+
   go_to(target_coords: tuple, state: dict) -> Generator
       BFS pathfinding from the player's current position to target_coords.
       This is a sub-generator — ALWAYS call it with `yield from` and
@@ -251,8 +258,31 @@ CORRECT — state updated after each step:
 For go_to (a sub-generator), use yield from and capture the returned state:
   state = yield from go_to(coords, state)
 
+For explore_for (a sub-generator), use yield from and capture both values:
+  coords, state = yield from explore_for("water", state, max_steps=120)
+
+NEVER use `yield from` with action primitives. They return int, not generators:
+
+WRONG:
+  state = yield from move_right()
+  state = yield from do_action()
+
+CORRECT:
+  state = yield move_right()
+  state = yield do_action()
+
 The last yield of a function does NOT need `state = ...` unless you use
 `state` afterwards.
+
+Skills must make a sustained attempt within one execution. Do not return after
+one exploratory movement just because the target is not visible. Use bounded
+loops (usually 20-80 environment steps) to explore, re-check perception, move
+to the target, and interact repeatedly. The Executor already has a hard timeout,
+so bounded loops are safe.
+
+If the task target is not visible in the current observation, the correct
+behavior is exploration inside the same skill execution, not immediate return.
+Use `explore_for(...)` for target objects that may not be visible initially.
 
 ================================================================================
 ## 8. Output Format Rules
@@ -265,6 +295,8 @@ The last yield of a function does NOT need `state = ...` unless you use
 - The function MUST accept exactly one argument named `state`.
 - The function MUST be a generator (contain at least one `yield`).
 - Apply the yield/send protocol correctly (`state = yield <action>`).
+- The function should usually yield many actions, not just one.
+- If a target is not visible, explore in a loop and keep checking again.
 - No explanations or comments outside the code fence.
 
 ================================================================================
@@ -275,16 +307,21 @@ The last yield of a function does NOT need `state = ...` unless you use
 
 ```python
 def collect_wood(state):
-    coords = find_nearest("tree", state)
-    if coords is None:
-        # No tree visible; move to explore
-        state = yield move_right()
-        return
-    state = yield from go_to(coords, state)
-    # Chop the tree three times to gather wood
-    state = yield do_action()
-    state = yield do_action()
-    state = yield do_action()
+    # Try for many steps; do not stop after one failed perception check.
+    for step in range(40):
+        if state["info"]["achievements"].get("collect_wood", 0):
+            return
+
+        coords, state = yield from explore_for("tree", state, max_steps=30)
+        if coords is None:
+            continue
+
+        state = yield from go_to(coords, state)
+        # Chopping may require several interactions.
+        for _ in range(5):
+            if state["info"]["achievements"].get("collect_wood", 0):
+                return
+            state = yield do_action()
 ```
 
 ### Example 2 — Craft a wood pickaxe (conditional placement + crafting)
@@ -300,6 +337,25 @@ def make_wood_pickaxe(state):
     if table_coords is not None:
         state = yield from go_to(table_coords, state)
     state = yield craft("wood_pickaxe")
+```
+
+### Example 3 - Drink water (target may not be visible initially)
+
+```python
+def collect_drink(state):
+    for _ in range(2):
+        if state["info"]["achievements"].get("collect_drink", 0):
+            return
+
+        water_coords, state = yield from explore_for("water", state, max_steps=120)
+        if water_coords is None:
+            continue
+
+        state = yield from go_to(water_coords, state)
+        for _ in range(4):
+            if state["info"]["achievements"].get("collect_drink", 0):
+                return
+            state = yield do_action()
 ```
 """
 

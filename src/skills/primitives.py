@@ -38,6 +38,7 @@ ACTION_PRIMITIVE_NAMES: frozenset[str] = frozenset({
     "craft",
     "place",
     "find_nearest",
+    "explore_for",
     "go_to",
     "get_position",
 })
@@ -153,6 +154,45 @@ def find_nearest(object_type: str, state: dict) -> tuple[int, int] | None:
     return (int(nearest[0]), int(nearest[1]))
 
 
+def explore_for(object_type: str, state: dict, max_steps: int = 80):
+    """
+    Sub-generator: explore in an expanding spiral until object_type is visible.
+
+    Perception still goes through find_nearest(), so this does not reveal
+    objects outside the visible window. The movement pattern is deterministic
+    and expands outward from the current area instead of pacing in a tiny loop.
+
+    Usage:
+        coords, state = yield from explore_for("water", state, max_steps=120)
+        if coords is None:
+            return
+    """
+    found = find_nearest(object_type, state)
+    if found is not None:
+        return found, state
+
+    actions = [_ACT_MOVE_RIGHT, _ACT_MOVE_DOWN, _ACT_MOVE_LEFT, _ACT_MOVE_UP]
+    steps = 0
+    leg_length = 1
+    direction_index = 0
+
+    while steps < max_steps:
+        for _ in range(2):
+            action = actions[direction_index % len(actions)]
+            direction_index += 1
+            for _ in range(leg_length):
+                if steps >= max_steps:
+                    return None, state
+                state = yield action
+                steps += 1
+                found = find_nearest(object_type, state)
+                if found is not None:
+                    return found, state
+        leg_length += 1
+
+    return None, state
+
+
 def _is_adjacent(x1: int, y1: int, x2: int, y2: int) -> bool:
     return abs(x1 - x2) + abs(y1 - y2) == 1
 
@@ -206,10 +246,7 @@ def _bfs(
                 continue
             new_path = path + [_DIR_TO_ACTION[(dx, dy)]]
             if is_goal(nx, ny):
-                # For non-walkable targets the goal cell is a walkable neighbor —
-                # we confirmed can_enter implicitly (it's in _WALKABLE_IDS or is
-                # the player's starting tile). For walkable targets, confirm entry.
-                if target_is_walkable and not can_enter(nx, ny):
+                if not can_enter(nx, ny):
                     continue  # target tile is walkable type but currently blocked
                 return new_path
             if not can_enter(nx, ny):
@@ -218,6 +255,13 @@ def _bfs(
             queue.append((nx, ny, new_path))
 
     return None  # unreachable
+
+
+def _face_target_action(px: int, py: int, tx: int, ty: int) -> int | None:
+    dx, dy = tx - px, ty - py
+    if abs(dx) + abs(dy) != 1:
+        return None
+    return _DIR_TO_ACTION.get((dx, dy))
 
 
 def go_to(target_coords: tuple, state: dict):
@@ -253,6 +297,9 @@ def go_to(target_coords: tuple, state: dict):
         if target_is_walkable and (px, py) == (tx, ty):
             return state
         if not target_is_walkable and _is_adjacent(px, py, tx, ty):
+            action = _face_target_action(px, py, tx, ty)
+            if action is not None:
+                state = yield action
             return state
 
         path = _bfs(px, py, tx, ty, semantic, target_is_walkable)
@@ -272,6 +319,9 @@ def go_to(target_coords: tuple, state: dict):
             if new_target_walkable and (cx, cy) == (tx, ty):
                 return state
             if not new_target_walkable and _is_adjacent(cx, cy, tx, ty):
+                action = _face_target_action(cx, cy, tx, ty)
+                if action is not None:
+                    state = yield action
                 return state
 
         # Path exhausted but not arrived → replan (outer loop).

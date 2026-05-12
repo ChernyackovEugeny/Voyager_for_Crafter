@@ -36,7 +36,7 @@ class SkillManager:
             return SaveResult(saved=False, outcome="name_taken")
 
         description = compose_description(name, task, code)
-        embedding = self._embedder.encode(description)
+        embedding = self._embedder.encode(task)
 
         dup_name, dup_sim = self._most_similar_existing(embedding)
         if dup_name is not None and dup_sim > self._cfg.similarity_dedup_threshold:

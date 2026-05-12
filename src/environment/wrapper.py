@@ -46,6 +46,11 @@ class CrafterEnv:
     def close(self):
         self._env.close()
 
+    def render(self, size=None):
+        if isinstance(size, int):
+            size = (size, size)
+        return self._env.render(size=size)
+
     # ------------------------------------------------------------------
     # Convenience accessors into info (populated after first step)
     # ------------------------------------------------------------------

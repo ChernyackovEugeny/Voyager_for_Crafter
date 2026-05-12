@@ -57,6 +57,21 @@ def _assert_safe(tree: ast.Module) -> None:
                 raise SkillLoadError(
                     f"skill code may not call forbidden builtin '{node.func.id}'"
                 )
+        if isinstance(node, ast.YieldFrom):
+            _assert_valid_yield_from(node)
+
+
+def _assert_valid_yield_from(node: ast.YieldFrom) -> None:
+    value = node.value
+    if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name):
+        return
+    name = value.func.id
+    sub_generators = {"go_to", "explore_for"}
+    if name in primitives.ACTION_PRIMITIVE_NAMES and name not in sub_generators:
+        raise SkillLoadError(
+            f"skill code may not use 'yield from {name}(...)'; "
+            f"{name} returns an int action, not a generator"
+        )
 
 
 def _referenced_names(tree: ast.Module) -> set[str]:

@@ -41,6 +41,7 @@ class Agent:
 
     def run(self) -> dict[str, Any]:
         """Run one episode through task proposal, skill selection, and execution."""
+        logger.info("[Agent] episode started")
         self.memory.reset()
         state, done = self._initial_state()
         iterations = 0
@@ -48,12 +49,28 @@ class Agent:
         while not done and iterations < self.max_iterations_per_episode:
             task = self.curriculum.propose_task(state["info"])
             if task is None:
+                logger.info("[Agent] episode stopped: all tasks done")
                 break
 
             self.current_task = task
+            logger.info("[Agent] task: %s | %s", task.name, task.description)
             done, state = self.step(state, task)
             iterations += 1
 
+        if done:
+            logger.info("[Agent] episode stopped: environment done")
+        elif iterations >= self.max_iterations_per_episode:
+            logger.info(
+                "[Agent] episode stopped: max_iterations reached | iterations=%d",
+                iterations,
+            )
+
+        achievements = self._unlocked_achievements(state["info"])
+        logger.info(
+            "[Agent] summary: iterations=%d | achievements=%s",
+            iterations,
+            ", ".join(achievements) if achievements else "none",
+        )
         return {
             "iterations": iterations,
             "final_state": state,
@@ -64,17 +81,21 @@ class Agent:
     def step(self, state: dict[str, Any], task) -> tuple[bool, dict[str, Any]]:
         """Run one task attempt and return (episode_done, final_state)."""
         candidates = self.skill_manager.retrieve(task.description)
+        self._log_retrieval(candidates)
         selected = self._select_reusable_skill(candidates)
         reused_name: str | None = None
 
         if selected is None:
+            logger.info("[Agent] codegen: generating new skill for %s", task.name)
             code = self._generate_skill(task, state, candidates)
             if code is None:
+                logger.info("[Agent] task failed: %s", task.name)
                 self.curriculum.record_task_failed(task, state)
                 return False, state
         else:
             code = selected.skill.code
             reused_name = selected.skill.name
+            logger.info("[Agent] reuse: %s", reused_name)
 
         try:
             function_name, skill_func = load_skill(
@@ -82,14 +103,18 @@ class Agent:
                 runtime=SkillRuntime(memory=self.memory),
             )
         except SkillLoadError as exc:
-            logger.warning("agent: failed to load skill for %s: %s", task.name, exc)
+            logger.warning("[Agent] load failed: %s | %s", task.name, exc)
             self.curriculum.record_task_failed(task, state)
             if reused_name is not None:
                 self.skill_manager.record_failure(reused_name)
             return False, state
 
         self.current_skill = reused_name or function_name
+        if reused_name is None:
+            logger.info("[Agent] codegen: generated function %s", function_name)
+        logger.info("[Agent] execute: %s", self.current_skill)
         result = self.executor.run(skill_func, self.env, state)
+        self._log_execution_result(result)
         final_state = result.final_state
         task_complete = self.curriculum.is_task_complete(
             task,
@@ -109,6 +134,7 @@ class Agent:
     def _initial_state(self) -> tuple[dict[str, Any], bool]:
         obs = self.env.reset()
         obs, _, terminated, truncated, info = self.env.step(0)
+        self.executor.render_state(self.env)
         return {"obs": obs, "info": info}, bool(terminated or truncated)
 
     def _select_reusable_skill(self, candidates):
@@ -140,23 +166,42 @@ class Agent:
         state: dict[str, Any],
     ) -> None:
         if task_complete:
+            logger.info("[Agent] task success: %s", task.name)
             if reused_name is not None:
+                logger.info("[Agent] metric: record_success(%s)", reused_name)
                 self.skill_manager.record_success(reused_name)
             else:
                 self._save_new_skill(task, code)
             return
 
+        logger.info("[Agent] task failed: %s", task.name)
         self.curriculum.record_task_failed(task, state)
         if reused_name is not None:
+            logger.info("[Agent] metric: record_failure(%s)", reused_name)
             self.skill_manager.record_failure(reused_name)
+        else:
+            logger.info("[Agent] discard: generated skill was not successful")
+            logger.info("[Agent] failed generated skill code:\n%s", code)
 
     def _save_new_skill(self, task, code: str) -> None:
+        name = self._unique_skill_name(task.name.replace("-", "_"))
         result = self.skill_manager.save(
-            name=self._unique_skill_name(task.name.replace("-", "_")),
+            name=name,
             code=code,
             task=task.description,
         )
+        if result.outcome == "ok":
+            logger.info("[Agent] save: %s | outcome=ok", name)
+            logger.info("[Agent] metric: record_success(%s)", name)
+            self.skill_manager.record_success(name)
         if result.outcome == "duplicate" and result.similar_to is not None:
+            logger.info(
+                "[Agent] save: %s | outcome=duplicate | similar_to=%s | sim=%.3f",
+                name,
+                result.similar_to,
+                result.similarity or 0.0,
+            )
+            logger.info("[Agent] metric: record_success(%s)", result.similar_to)
             self.skill_manager.record_success(result.similar_to)
 
     def _unique_skill_name(self, base: str) -> str:
@@ -178,3 +223,41 @@ class Agent:
             }
             for candidate in candidates
         ]
+
+    def _log_retrieval(self, candidates) -> None:
+        if not candidates:
+            logger.info("[Agent] retrieve: 0 candidates")
+            return
+        best = candidates[0]
+        route = "reuse" if best.similarity >= self.reuse_threshold else "codegen"
+        logger.info(
+            "[Agent] retrieve: best=%s sim=%.3f threshold=%.3f -> %s",
+            best.skill.name,
+            best.similarity,
+            self.reuse_threshold,
+            route,
+        )
+
+    @staticmethod
+    def _log_execution_result(result) -> None:
+        gained = ", ".join(result.achievements_gained)
+        if not gained:
+            gained = "none"
+        logger.info(
+            "[Executor] result: %s | steps=%d | reward=%.3f | gained=%s",
+            result.reason.value,
+            result.steps,
+            result.total_reward,
+            gained,
+        )
+        if result.error:
+            first_line = result.error.splitlines()[0] if result.error else ""
+            logger.info("[Executor] error: %s", first_line)
+
+    @staticmethod
+    def _unlocked_achievements(info: dict[str, Any]) -> list[str]:
+        return sorted(
+            key
+            for key, value in info.get("achievements", {}).items()
+            if value
+        )

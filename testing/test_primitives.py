@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import crafter.constants as C
 from environment.ids import NAME_TO_ID
-from skills.primitives import craft, find_nearest, get_position, place
+from skills.primitives import craft, explore_for, find_nearest, get_position, go_to, place
 
 
 class PrimitiveTests(unittest.TestCase):
@@ -43,3 +43,92 @@ class PrimitiveTests(unittest.TestCase):
 
         self.assertIsNone(find_nearest("not_a_real_object", state))
         self.assertIsNone(find_nearest("diamond", state))
+
+    def test_go_to_faces_non_walkable_target_before_returning(self):
+        semantic = np.full((64, 64), NAME_TO_ID["grass"], dtype=int)
+        semantic[2, 0] = NAME_TO_ID["tree"]
+        state = {
+            "obs": None,
+            "info": {
+                "semantic": semantic,
+                "player_pos": (0, 0),
+                "view_size": (9, 9),
+                "inventory": {},
+            },
+        }
+        generator = go_to((2, 0), state)
+
+        first_action = next(generator)
+        self.assertEqual(first_action, C.actions.index("move_right"))
+
+        state["info"]["player_pos"] = (1, 0)
+        second_action = generator.send(state)
+        self.assertEqual(second_action, C.actions.index("move_right"))
+
+        with self.assertRaises(StopIteration):
+            generator.send(state)
+
+    def test_go_to_does_not_route_through_blocked_adjacent_cell(self):
+        semantic = np.full((64, 64), NAME_TO_ID["grass"], dtype=int)
+        semantic[1, 0] = NAME_TO_ID["stone"]
+        semantic[2, 0] = NAME_TO_ID["tree"]
+        state = {
+            "obs": None,
+            "info": {
+                "semantic": semantic,
+                "player_pos": (0, 0),
+                "view_size": (9, 9),
+                "inventory": {},
+            },
+        }
+        generator = go_to((2, 0), state)
+
+        first_action = next(generator)
+        self.assertNotEqual(first_action, C.actions.index("move_right"))
+
+    def test_explore_for_returns_visible_target_without_moving(self):
+        semantic = np.full((64, 64), NAME_TO_ID["grass"], dtype=int)
+        semantic[4, 0] = NAME_TO_ID["water"]
+        state = {
+            "obs": None,
+            "info": {
+                "semantic": semantic,
+                "player_pos": (0, 0),
+                "view_size": (9, 9),
+                "inventory": {},
+            },
+        }
+        generator = explore_for("water", state, max_steps=5)
+
+        with self.assertRaises(StopIteration) as ctx:
+            next(generator)
+        coords, returned_state = ctx.exception.value
+        self.assertEqual(coords, (4, 0))
+        self.assertIs(returned_state, state)
+
+    def test_explore_for_uses_expanding_spiral_actions(self):
+        semantic = np.full((64, 64), NAME_TO_ID["grass"], dtype=int)
+        state = {
+            "obs": None,
+            "info": {
+                "semantic": semantic,
+                "player_pos": (20, 20),
+                "view_size": (9, 9),
+                "inventory": {},
+            },
+        }
+        generator = explore_for("water", state, max_steps=6)
+
+        actions = []
+        actions.append(next(generator))
+        for _ in range(5):
+            actions.append(generator.send(state))
+
+        self.assertEqual(actions, [
+            C.actions.index("move_right"),
+            C.actions.index("move_down"),
+            C.actions.index("move_left"),
+            C.actions.index("move_left"),
+            C.actions.index("move_up"),
+            C.actions.index("move_up"),
+        ])

@@ -2,6 +2,8 @@ import sys
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent.executor import Executor, InterruptReason
@@ -14,6 +16,7 @@ class FakeEnv:
         self._plan = plan
         self._i = 0
         self.actions = []
+        self.render_calls = []
 
     def step(self, action):
         self.actions.append(action)
@@ -21,6 +24,18 @@ class FakeEnv:
         self._i += 1
         obs, reward, terminated, truncated, info = self._plan[idx]
         return obs, reward, terminated, truncated, info
+
+    def render(self, size=None):
+        self.render_calls.append(size)
+        return np.zeros((4, 4, 3), dtype=np.uint8)
+
+
+class FakeViewer:
+    def __init__(self):
+        self.frames = []
+
+    def show(self, frame):
+        self.frames.append(frame)
 
 
 def state(health=9, achievements=None, obs="obs"):
@@ -139,6 +154,55 @@ class TestExecutor(unittest.TestCase):
         self.assertEqual(seen, [["info", "obs"], ["info", "obs"]])
         self.assertEqual(result.final_state["obs"], "new_obs")
         self.assertEqual(result.final_state["info"]["inventory"]["health"], 9)
+
+    def test_render_disabled_by_default(self):
+        ex = Executor(max_steps_per_skill=2, health_threshold=4)
+        env = FakeEnv([("obs", 0.0, False, False, state()["info"])])
+
+        def skill(current):
+            current = yield 0
+
+        ex.run(skill, env, state())
+        self.assertEqual(env.render_calls, [])
+
+    def test_render_enabled_draws_after_each_environment_step(self):
+        viewer = FakeViewer()
+        ex = Executor(
+            max_steps_per_skill=10,
+            health_threshold=4,
+            render=True,
+            render_size=320,
+            render_delay_s=0,
+            render_viewer=viewer,
+        )
+        env = FakeEnv([("obs", 0.0, False, False, state()["info"])])
+
+        def skill(current):
+            current = yield 0
+            current = yield 0
+
+        ex.run(skill, env, state())
+        self.assertEqual(env.render_calls, [320, 320])
+        self.assertEqual(len(viewer.frames), 2)
+
+    def test_render_enabled_without_env_render_does_not_raise(self):
+        class NoRenderEnv:
+            def step(self, action):
+                return "obs", 0.0, False, False, state()["info"]
+
+        ex = Executor(
+            max_steps_per_skill=2,
+            health_threshold=4,
+            render=True,
+            render_delay_s=0,
+        )
+
+        def skill(current):
+            while True:
+                current = yield 0
+
+        result = ex.run(skill, NoRenderEnv(), state())
+        self.assertEqual(result.reason, InterruptReason.TIMEOUT)
 
 
 if __name__ == "__main__":
