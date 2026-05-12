@@ -29,6 +29,27 @@ from environment.ids import NAME_TO_ID as _NAME_TO_ID, WALKABLE_IDS as _WALKABLE
 from environment.view import visible_semantic_window
 
 
+# Single source of truth for primitive calls available to generated skills.
+PRIMITIVE_NAMES: frozenset[str] = frozenset({
+    "move_left",
+    "move_right",
+    "move_up",
+    "move_down",
+    "do_action",
+    "sleep_action",
+    "craft",
+    "place",
+    "find_nearest",
+    "go_to",
+    "get_position",
+    "get_memory",
+    "save_in_memory",
+    "delete_memory",
+    "set_home",
+    "get_home",
+})
+
+
 # ---------------------------------------------------------------------------
 # Action-index constants (pre-computed at import time)
 # ---------------------------------------------------------------------------
