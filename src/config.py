@@ -116,6 +116,7 @@ class ExecutorConfig(_BaseGroup):
     )
 
     max_steps_per_skill: int = 200
+    max_iterations_per_episode: int = 50
     health_interrupt_threshold: int = 4
     stagnation_window: int = 15
 

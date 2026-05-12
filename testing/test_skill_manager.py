@@ -110,6 +110,11 @@ class SkillManagerTests(unittest.TestCase):
         self.assertEqual(skill.success_count, 2)
         self.assertEqual(skill.fail_count, 1)
 
+    def test_exists_reports_repository_presence(self):
+        self.assertFalse(self.manager.exists("wood"))
+        self.manager.save(name="wood", code="def f(state): yield 0", task="collect wood")
+        self.assertTrue(self.manager.exists("wood"))
+
     def test_missing_metric_update_logs_and_does_not_raise(self):
         with self.assertLogs("skills.skill_manager", level="WARNING") as logs:
             self.manager.record_failure("missing")

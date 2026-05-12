@@ -65,6 +65,10 @@ class SkillManager:
         pairs = self._repo.search(embedding, k=limit)
         return [SkillCandidate(skill=skill, similarity=sim) for skill, sim in pairs]
 
+    def exists(self, name: str) -> bool:
+        """Return True if a skill with this repository name already exists."""
+        return self._repo.get(name) is not None
+
     def record_success(self, name: str) -> None:
         self._safe_update(name, success_delta=1)
 
