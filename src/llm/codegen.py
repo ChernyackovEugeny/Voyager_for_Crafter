@@ -2,12 +2,7 @@ import re
 
 import openai
 
-from config import (
-    DEEPSEEK_API_KEY,
-    DEEPSEEK_BASE_URL,
-    DEEPSEEK_CODEGEN_MODEL,
-    CODEGEN_TEMPERATURE,
-)
+from config import get_settings
 from prompts.codegen_prompt import SYSTEM_PROMPT, format_user_prompt, format_fix_prompt
 
 
@@ -15,9 +10,13 @@ class CodeGen:
     """Generates and fixes yield-generator skill functions via DeepSeek V3."""
 
     def __init__(self):
+        cfg = get_settings().llm
+        self._model = cfg.codegen_model
+        self._temperature = cfg.codegen_temperature
         self._client = openai.OpenAI(
-            api_key=DEEPSEEK_API_KEY,
-            base_url=DEEPSEEK_BASE_URL,
+            api_key=cfg.deepseek_api_key,
+            base_url=cfg.deepseek_base_url,
+            timeout=cfg.request_timeout_s,
         )
 
     # ------------------------------------------------------------------
@@ -77,8 +76,8 @@ class CodeGen:
 
     def _call_api(self, user_prompt: str) -> str:
         response = self._client.chat.completions.create(
-            model=DEEPSEEK_CODEGEN_MODEL,
-            temperature=CODEGEN_TEMPERATURE,
+            model=self._model,
+            temperature=self._temperature,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user",   "content": user_prompt},

@@ -1,23 +1,19 @@
-# Crafter environment
-crafter
+# ---- environment + game ----
+crafter==1.8.3
+numpy>=1.24,<2.0           # crafter is not numpy 2.0 compatible
 
-# LLM API (DeepSeek via OpenAI-compatible API)
-openai
+# ---- LLM ----
+openai>=1.51,<2.0          # DeepSeek exposes an OpenAI-compatible API
+tiktoken>=0.7              # token counting for cost analytics
 
-# Vector DB for skill library
-chromadb
+# ---- embeddings ----
+sentence-transformers>=3.0,<4.0
 
-# Embeddings (all-MiniLM-L6-v2, local)
-sentence-transformers
+# ---- storage ----
+chromadb>=0.5.20,<0.6      # client SDK; server runs in docker-compose
+psycopg2-binary>=2.9,<3.0  # same driver as the Banking project — analytics writer
 
-# Numerical operations
-numpy
-
-# Environment config (.env loading)
-python-dotenv
-
-# Token counting / cost estimation
-tiktoken
-
-# RL environment interface
-gymnasium
+# ---- config ----
+pydantic>=2.6,<3.0
+pydantic-settings>=2.2,<3.0
+python-dotenv>=1.0,<2.0    # explicit .env loader for local non-docker runs
