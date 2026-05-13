@@ -11,9 +11,14 @@ from main import _parse_args
 class MainCliTests(unittest.TestCase):
     def test_render_defaults_to_disabled(self):
         args = _parse_args([])
+        self.assertEqual(args.mode, "train")
         self.assertFalse(args.render)
         self.assertEqual(args.render_size, 512)
         self.assertEqual(args.render_step_delay, 0.05)
+
+    def test_mode_argument(self):
+        args = _parse_args(["--mode", "inference"])
+        self.assertEqual(args.mode, "inference")
 
     def test_render_arguments(self):
         args = _parse_args([

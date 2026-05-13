@@ -31,11 +31,19 @@ class HardcodedCurriculum:
     def __init__(self) -> None:
         self._failures: list[_TaskFailure] = []
 
-    def propose_task(self, info: dict[str, Any]) -> Task | None:
+    def propose_task(
+        self,
+        info: dict[str, Any],
+        *,
+        skip: set[str] | None = None,
+    ) -> Task | None:
         """Return the first unfinished unlocked achievement, or None if done."""
         completed = self._completed_from_info(info)
+        skipped = skip or set()
         for achievement_key in TECH_TREE_ORDER:
             if achievement_key in completed:
+                continue
+            if achievement_key in skipped:
                 continue
             achievement = ACHIEVEMENTS[achievement_key]
             if not all(prereq in completed for prereq in achievement.prerequisites):

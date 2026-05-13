@@ -64,6 +64,13 @@ class HardcodedCurriculumTests(unittest.TestCase):
 
         self.assertEqual(task.achievement_key, "collect_drink")
 
+    def test_skip_excludes_task_for_current_proposal(self):
+        curriculum = HardcodedCurriculum()
+
+        task = curriculum.propose_task(_info({}), skip={"collect_wood"})
+
+        self.assertEqual(task.achievement_key, "collect_drink")
+
     def test_skips_completed_tasks(self):
         curriculum = HardcodedCurriculum()
 

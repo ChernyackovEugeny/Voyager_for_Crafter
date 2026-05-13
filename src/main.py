@@ -7,6 +7,8 @@ import logging
 from agent.agent import Agent
 from agent.executor import Executor
 from agent.memory import SpatialMemory
+from agent.strategies.inference import InferenceStrategy
+from agent.strategies.training import TrainingStrategy
 from analytics.log_utils import log_session_finalize
 from analytics.run_logger import RunLogger
 from config import get_settings
@@ -21,6 +23,12 @@ from storage.skill_repository import ChromaSkillRepository
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one Voyager-Crafter episode.")
+    parser.add_argument(
+        "--mode",
+        choices=("train", "inference"),
+        default="train",
+        help="Agent mode: train can call LLM and save skills; inference only reuses.",
+    )
     parser.add_argument(
         "--render",
         action="store_true",
@@ -55,6 +63,7 @@ def main(argv: list[str] | None = None) -> None:
 
     log = logging.getLogger("main")
     log.info("voyager-crafter starting up")
+    log.info("mode: %s", args.mode)
     log.info("skill library: %s", settings.chroma.skills_collection)
 
     env = CrafterEnv(**settings.environment.crafter_kwargs)
@@ -79,14 +88,23 @@ def main(argv: list[str] | None = None) -> None:
                 args.render_size,
                 args.render_step_delay,
             )
+        if args.mode == "train":
+            strategy = TrainingStrategy(
+                codegen=CodeGen(),
+                reuse_threshold=settings.embedding.similarity_reuse_threshold,
+                run_logger=run_log,
+            )
+        else:
+            strategy = InferenceStrategy(
+                reuse_threshold=settings.embedding.similarity_reuse_threshold,
+            )
         agent = Agent(
             env=env,
             curriculum=HardcodedCurriculum(),
             skill_manager=skill_manager,
-            codegen=CodeGen(),
+            strategy=strategy,
             executor=executor,
             memory=SpatialMemory(),
-            reuse_threshold=settings.embedding.similarity_reuse_threshold,
             max_iterations_per_episode=(
                 settings.executor.max_iterations_per_episode
             ),
