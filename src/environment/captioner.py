@@ -31,6 +31,7 @@ def caption(obs: np.ndarray, info: dict) -> str:
         _observation_line(info),
         _inventory_line(info),
         _status_line(info),
+        _position_line(info),
     ])
 
 
@@ -97,3 +98,15 @@ def _status_line(info: dict) -> str:
         for k in ("health", "food", "drink", "energy")
     ]
     return f"Status: {', '.join(parts)}"
+
+
+def _position_line(info: dict) -> str:
+    pos = info.get("player_pos")
+    facing = info.get("player_facing")
+    if pos is None:
+        return "Position: unknown"
+    x, y = int(pos[0]), int(pos[1])
+    if facing is None:
+        return f"Position: x={x}, y={y}"
+    dx, dy = int(facing[0]), int(facing[1])
+    return f"Position: x={x}, y={y}, facing=({dx},{dy})"

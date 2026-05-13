@@ -254,7 +254,7 @@ def main(argv: list[str] | None = None) -> None:
                 max_fix_attempts=settings.llm.max_fix_attempts,
                 skill_validator=skill_validator,
                 min_reflection_steps=settings.executor.min_reflection_steps,
-                protected_reflection_skill_names=set(BOOTSTRAP_CODE),
+                protected_reflection_skill_names=set(BOOTSTRAP_CODE) - {"survive"},
             )
         else:
             strategy = InferenceStrategy(

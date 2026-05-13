@@ -349,10 +349,14 @@ def _build_report(settings: Settings, args: EvalArgs) -> dict[str, Any]:
             if row["run_idx"] == run_idx and row["mode"] == "inference"
         ]
         training_window = training[-args.last_k_training_episodes:]
-        skills_learned = _skill_count(settings, _collection_name(args.eval_id, run_idx))
+        skill_breakdown = _skill_breakdown(
+            settings,
+            _collection_name(args.eval_id, run_idx),
+        )
         per_run.append({
             "run_idx": run_idx,
-            "skills_learned": skills_learned,
+            "skills_learned": skill_breakdown["total"],
+            "skill_breakdown": skill_breakdown,
             "training_episodes": len(training),
             "inference_episodes": len(inference),
             "cost_usd": costs.get(run_idx, 0.0),
@@ -452,18 +456,29 @@ def _fetch_task_diagnostics(
                     s.run_metadata->>'mode' AS mode,
                     t.task_name,
                     COALESCE(t.failure_reason, 'complete') AS outcome,
+                    t.generated,
+                    t.reused_skill,
                     COUNT(*) AS attempts,
                     COUNT(*) FILTER (WHERE t.steps = 0) AS zero_step_attempts
                 FROM task_attempts t
                 JOIN sessions s ON s.session_id = t.session_id
                 WHERE s.run_metadata @> %s::jsonb
                   AND s.status = 'completed'
-                GROUP BY 1, 2, 3, 4
+                GROUP BY 1, 2, 3, 4, 5, 6
                 """,
                 (json.dumps({"eval_id": eval_id}),),
             )
             out: dict[int, dict[str, Any]] = {}
-            for run_idx, mode, task, outcome, attempts, zero_steps in cur.fetchall():
+            for (
+                run_idx,
+                mode,
+                task,
+                outcome,
+                generated,
+                reused_skill,
+                attempts,
+                zero_steps,
+            ) in cur.fetchall():
                 if run_idx is None:
                     continue
                 run = out.setdefault(int(run_idx), {"by_mode": {}})
@@ -472,23 +487,47 @@ def _fetch_task_diagnostics(
                     {
                         "attempts": 0,
                         "zero_step_attempts": 0,
+                        "zero_step_outcomes": {},
                         "outcomes": {},
+                        "source_counts": {},
                         "top_tasks": {},
+                        "top_failed_reused_skills": {},
                     },
                 )
                 mode_data["attempts"] += int(attempts)
                 mode_data["zero_step_attempts"] += int(zero_steps)
+                if int(zero_steps) > 0:
+                    mode_data["zero_step_outcomes"][outcome] = (
+                        mode_data["zero_step_outcomes"].get(outcome, 0)
+                        + int(zero_steps)
+                    )
                 mode_data["outcomes"][outcome] = (
                     mode_data["outcomes"].get(outcome, 0) + int(attempts)
+                )
+                source = "generated" if generated else "reused"
+                mode_data["source_counts"][source] = (
+                    mode_data["source_counts"].get(source, 0) + int(attempts)
                 )
                 mode_data["top_tasks"][task] = (
                     mode_data["top_tasks"].get(task, 0) + int(attempts)
                 )
+                if reused_skill is not None and outcome != "complete":
+                    mode_data["top_failed_reused_skills"][reused_skill] = (
+                        mode_data["top_failed_reused_skills"].get(reused_skill, 0)
+                        + int(attempts)
+                    )
             for run in out.values():
                 for mode_data in run["by_mode"].values():
                     mode_data["top_tasks"] = dict(
                         sorted(
                             mode_data["top_tasks"].items(),
+                            key=lambda item: item[1],
+                            reverse=True,
+                        )[:8]
+                    )
+                    mode_data["top_failed_reused_skills"] = dict(
+                        sorted(
+                            mode_data["top_failed_reused_skills"].items(),
                             key=lambda item: item[1],
                             reverse=True,
                         )[:8]
@@ -532,13 +571,18 @@ def _fetch_llm_diagnostics(
             return out
 
 
-def _skill_count(settings: Settings, collection: str) -> int:
+def _skill_breakdown(settings: Settings, collection: str) -> dict[str, int]:
     old_collection = settings.chroma.skills_collection
     try:
         settings.chroma.skills_collection = collection
-        return ChromaSkillRepository(settings.chroma).count()
+        skills = ChromaSkillRepository(settings.chroma).list_skills()
+        breakdown: dict[str, int] = {"total": len(skills)}
+        for skill in skills:
+            key = f"origin_{skill.origin or 'generated'}"
+            breakdown[key] = breakdown.get(key, 0) + 1
+        return breakdown
     except Exception:
-        return 0
+        return {"total": 0}
     finally:
         settings.chroma.skills_collection = old_collection
 
@@ -583,12 +627,15 @@ def _markdown_report(report: dict[str, Any]) -> str:
         "",
         "## Per Run",
         "",
-        "| Run | Skills | Train eps | Infer eps | Cost | Training score | Inference score |",
-        "|---:|---:|---:|---:|---:|---:|---:|",
+        "| Run | Skills | Bootstrap | Generated | Train eps | Infer eps | Cost | Training score | Inference score |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in report["per_run"]:
+        skill_breakdown = row.get("skill_breakdown", {})
         lines.append(
             f"| {row['run_idx']} | {row['skills_learned']} | "
+            f"{skill_breakdown.get('origin_bootstrap', 0)} | "
+            f"{skill_breakdown.get('origin_generated', 0)} | "
             f"{row['training_episodes']} | {row['inference_episodes']} | "
             f"${row['cost_usd']:.4f} | "
             f"{row['training_score']:.4f} | {row['inference_score']:.4f} |"
@@ -611,11 +658,26 @@ def _markdown_report(report: dict[str, Any]) -> str:
             top_tasks = ", ".join(
                 f"{name}={count}" for name, count in data["top_tasks"].items()
             )
+            zero_outcomes = ", ".join(
+                f"{name}={count}"
+                for name, count in sorted(data.get("zero_step_outcomes", {}).items())
+            )
+            sources = ", ".join(
+                f"{name}={count}"
+                for name, count in sorted(data.get("source_counts", {}).items())
+            )
             lines.append(
                 f"- {mode}: attempts={data['attempts']}, "
                 f"zero_step={data['zero_step_attempts']}, "
-                f"outcomes=({outcomes}), top_tasks=({top_tasks})"
+                f"sources=({sources}), outcomes=({outcomes}), "
+                f"zero_outcomes=({zero_outcomes}), top_tasks=({top_tasks})"
             )
+            failed_reuse = data.get("top_failed_reused_skills", {})
+            if failed_reuse:
+                failed = ", ".join(
+                    f"{name}={count}" for name, count in failed_reuse.items()
+                )
+                lines.append(f"  failed_reuse=({failed})")
         lines.append("")
     lines.append("")
     return "\n".join(lines)

@@ -170,6 +170,14 @@ def _task():
     )
 
 
+def _survive_task():
+    return Task(
+        name="survive",
+        description="Restore survival stats and avoid visible enemies.",
+        achievement_key=None,
+    )
+
+
 def _place_table_task():
     return Task(
         name="place-table",
@@ -230,6 +238,20 @@ class TrainingStrategyTests(unittest.TestCase):
             obs=None,
             info=_info(),
             candidates=[_candidate(name="collect_wood_2", similarity=0.95)],
+        )
+
+        self.assertTrue(source.generated)
+        self.assertEqual(len(codegen.calls), 1)
+
+    def test_survive_does_not_reuse_narrow_survival_subskill_as_controller(self):
+        codegen = FakeCodeGen()
+        strategy = TrainingStrategy(codegen=codegen, reuse_threshold=0.85)
+
+        source = strategy.acquire_skill(
+            task=_survive_task(),
+            obs=None,
+            info=_info(),
+            candidates=[_candidate(name="collect_drink", similarity=0.95)],
         )
 
         self.assertTrue(source.generated)
@@ -595,6 +617,76 @@ class TrainingStrategyTests(unittest.TestCase):
         self.assertEqual(manager.saved, [])
         self.assertEqual(len(curriculum.failures), 1)
 
+    def test_generated_survive_partial_progress_saves_skill(self):
+        manager = FakeSkillManager()
+        curriculum = FakeCurriculum()
+        strategy = TrainingStrategy(codegen=FakeCodeGen(), reuse_threshold=0.85)
+        source = strategy.acquire_skill(
+            task=_survive_task(),
+            obs=None,
+            info=_info(),
+            candidates=[],
+        )
+
+        strategy.on_task_failed(
+            task=_survive_task(),
+            source=source,
+            state={
+                "initial_info": {
+                    "inventory": {
+                        "health": 5,
+                        "food": 4,
+                        "drink": 3,
+                        "energy": 6,
+                    }
+                },
+                "info": _info()
+                | {
+                    "inventory": {
+                        "health": 5,
+                        "food": 4,
+                        "drink": 8,
+                        "energy": 5,
+                    }
+                },
+                "failure_reason": "task_incomplete",
+                "executor_reason": "completed",
+                "executor_steps": 25,
+            },
+            skill_manager=manager,
+            curriculum=curriculum,
+        )
+
+        self.assertEqual(manager.saved[0]["name"], "survive")
+        self.assertEqual(manager.successes, ["survive"])
+        self.assertEqual(len(curriculum.failures), 1)
+
+    def test_generated_survive_death_does_not_save_partial_skill(self):
+        manager = FakeSkillManager()
+        strategy = TrainingStrategy(codegen=FakeCodeGen(), reuse_threshold=0.85)
+        source = strategy.acquire_skill(
+            task=_survive_task(),
+            obs=None,
+            info=_info(),
+            candidates=[],
+        )
+
+        strategy.on_task_failed(
+            task=_survive_task(),
+            source=source,
+            state={
+                "initial_info": {"inventory": {"health": 5, "drink": 3}},
+                "info": _info() | {"inventory": {"health": 0, "drink": 8}},
+                "failure_reason": "episode_done",
+                "executor_reason": "episode_done",
+                "executor_steps": 100,
+            },
+            skill_manager=manager,
+            curriculum=FakeCurriculum(),
+        )
+
+        self.assertEqual(manager.saved, [])
+
     def test_generated_runtime_error_queues_fixed_skill_for_retry(self):
         fixed_code = "def collect_wood(state):\n    state = yield 1\n"
         bug_fixer = FakeBugFixer(fix_codes=[fixed_code])
@@ -762,6 +854,42 @@ class TrainingStrategyTests(unittest.TestCase):
 
         self.assertIsNone(call)
         self.assertEqual(reflection.calls, [])
+
+    def test_survive_can_reflect_even_when_protected_and_no_prior_success(self):
+        manager = FakeSkillManager()
+        manager.records["survive"] = SkillRecord(
+            name="survive",
+            code=_skill_code(),
+            description="Restore survival stats.",
+            success_count=0,
+        )
+        reflection = FakeReflection()
+        strategy = TrainingStrategy(
+            codegen=FakeCodeGen(),
+            reuse_threshold=0.85,
+            reflection=reflection,
+            reflection_enabled=True,
+            protected_reflection_skill_names={"survive"},
+        )
+
+        call = strategy.on_task_failed(
+            task=_survive_task(),
+            source=type("Source", (), {
+                "reused_name": "survive",
+                "code": _skill_code(),
+            })(),
+            state={
+                "info": _info() | {"inventory": {"health": 0}},
+                "failure_reason": "episode_done",
+                "executor_steps": 80,
+            },
+            skill_manager=manager,
+            curriculum=FakeCurriculum(),
+        )
+
+        self.assertIs(call, reflection.call)
+        self.assertEqual(len(reflection.calls), 1)
+        self.assertEqual(manager.code_updates[0][0], "survive")
 
     def test_codegen_receives_previous_failure_on_retry(self):
         codegen = FakeCodeGen()

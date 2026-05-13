@@ -68,11 +68,39 @@ BOOTSTRAP_SKILLS: tuple[BootstrapSkillSpec, ...] = (
         name="build_shelter",
         description=(
             "Build a minimal base: collect enough wood if needed, place a table "
-            "on safe walkable ground, save set_home(get_position(state)) and the "
-            "table location, then retreat from visible hostiles. Do not call "
-            "explore_for. Guard any grass, tree, or table coordinates before "
-            "go_to, save_in_memory, or indexing."
+            "only when the tile in front can accept it, save "
+            "set_home(get_position(state)) and the table location, then use "
+            "defensive placement when possible: place stone blocks to close "
+            "gaps or make a small barrier against visible hostiles. Do not call "
+            "explore_for. Guard any grass, tree, stone, or table coordinates "
+            "before go_to, save_in_memory, or indexing."
             " End with return state, not bare return."
+        ),
+    ),
+    BootstrapSkillSpec(
+        name="make_wood_pickaxe",
+        description=(
+            "Craft a wooden pickaxe reliably. Ensure a crafting table exists, "
+            "collect enough wood for table plus pickaxe when needed, stand next "
+            "to the table, and craft wood_pickaxe. Avoid visible hostiles and "
+            "return state."
+        ),
+    ),
+    BootstrapSkillSpec(
+        name="collect_stone",
+        description=(
+            "Mine at least one stone with a wooden pickaxe. Craft the pickaxe "
+            "first if needed, use visible or remembered stone, save stone "
+            "coordinates, go adjacent, mine, and avoid visible hostiles."
+        ),
+    ),
+    BootstrapSkillSpec(
+        name="place_stone",
+        description=(
+            "Place a stone block near the saved home or crafting table to start "
+            "fortifying the base. Collect stone first if needed, return to the "
+            "base, place only when can_place_ahead('stone', state) is true, and "
+            "avoid visible hostiles."
         ),
     ),
     BootstrapSkillSpec(
@@ -99,12 +127,16 @@ BOOTSTRAP_SKILLS: tuple[BootstrapSkillSpec, ...] = (
             "Survive the first night and recover health, food, drink, and energy. "
             "Use remembered water, food, and home first; otherwise scout only in "
             "short explicit loops with a danger check after every yield. If a "
-            "hostile is visible, immediately move away for several steps or fight "
-            "only when armed. Stop only when no hostile is visible and health, "
-            "food, and drink are recovered. Use get_memory().get('water'), not "
-            "get_memory('water'). Do not call explore_for or invented helper "
-            "functions. Do not walk in a four-cell circle. Guard remembered "
-            "water, food, and home coordinates before go_to or indexing."
+            "hostile is visible, immediately move away for several steps, or if "
+            "stone is available use can_place_ahead('stone', state) and "
+            "place('stone') to block a path or close a gap near home. If no "
+            "stone is available but wood is available, place a table as a "
+            "temporary obstacle and home anchor. Fight only when armed. Stop "
+            "only when no hostile is visible and health, food, and drink are "
+            "recovered. Use get_memory().get('water'), not get_memory('water'). "
+            "Do not call explore_for or invented helper functions. Do not walk "
+            "in a four-cell circle. Guard remembered water, food, and home "
+            "coordinates before go_to or indexing."
             " End with return state, not bare return."
         ),
     ),
@@ -211,6 +243,34 @@ def collect_drink(state):
         ):
             return state
         if is_hostile_visible(state):
+            zombie = find_nearest("zombie", state)
+            skeleton = find_nearest("skeleton", state)
+            arrow = find_nearest("arrow", state)
+            has_sword = (
+                inv.get("wood_sword", 0) > 0
+                or inv.get("stone_sword", 0) > 0
+                or inv.get("iron_sword", 0) > 0
+            )
+            if (
+                zombie is not None
+                and skeleton is None
+                and arrow is None
+                and has_sword
+                and inv.get("health", 9) >= 5
+            ):
+                state = yield from go_to(zombie, state)
+                for _ in range(5):
+                    if not is_hostile_visible(state):
+                        break
+                    state = yield do_action()
+                continue
+            if inv.get("stone", 0) > 0 and can_place_ahead("stone", state):
+                state = yield place("stone")
+                continue
+            if inv.get("wood", 0) >= 2 and can_place_ahead("table", state):
+                state = yield place("table")
+                set_home(get_position(state))
+                continue
             state = yield move_away_from_hostile(state)
             continue
         if water_coords is None:
@@ -314,24 +374,178 @@ def build_minimal_base(state):
         state = yield from collect_wood(state)
     if state["info"]["inventory"].get("wood", 0) < 2:
         return state
-    safe_ground = None
-    for name in ("grass", "sand", "path"):
-        coords = find_nearest(name, state)
-        if coords is not None:
-            safe_ground = coords
+    direction = 0
+    segment_len = 3
+    segment_progress = 0
+    turns = 0
+    for step in range(40):
+        if state["info"]["achievements"].get("place_table", 0):
             break
-    if safe_ground is not None:
-        state = yield from go_to(safe_ground, state)
-    for _ in range(3):
         if is_hostile_visible(state):
             state = yield move_away_from_hostile(state)
-        else:
+            continue
+        if can_place_ahead("table", state):
+            state = yield place("table")
             break
-    state = yield place("table")
+        if direction == 0:
+            state = yield move_right()
+        elif direction == 1:
+            state = yield move_down()
+        elif direction == 2:
+            state = yield move_left()
+        else:
+            state = yield move_up()
+        segment_progress += 1
+        if segment_progress >= segment_len:
+            direction = (direction + 1) % 4
+            segment_progress = 0
+            turns += 1
+            if turns % 2 == 0:
+                segment_len += 1
     table_coords = find_nearest("table", state)
     if table_coords is not None:
         save_in_memory("table", table_coords)
     set_home(get_position(state))
+    return state
+""",
+    "make_wood_pickaxe": """\
+def make_wood_pickaxe(state):
+    if state["info"]["inventory"].get("wood_pickaxe", 0) >= 1:
+        return state
+    table_coords = get_memory().get("table")
+    visible_table = find_nearest("table", state)
+    if visible_table is not None:
+        table_coords = visible_table
+        save_in_memory("table", table_coords)
+    if table_coords is None and not state["info"]["achievements"].get("place_table", 0):
+        if state["info"]["inventory"].get("wood", 0) < 3:
+            state = yield from collect_wood(state)
+        if state["info"]["inventory"].get("wood", 0) >= 2:
+            state = yield from build_shelter(state)
+        visible_table = find_nearest("table", state)
+        if visible_table is not None:
+            table_coords = visible_table
+            save_in_memory("table", table_coords)
+    if state["info"]["inventory"].get("wood", 0) < 1:
+        state = yield from collect_wood(state)
+    if state["info"]["inventory"].get("wood", 0) < 1:
+        return state
+    if table_coords is None:
+        table_coords = get_memory().get("table")
+    if table_coords is None:
+        table_coords = find_nearest("table", state)
+        if table_coords is not None:
+            save_in_memory("table", table_coords)
+    if table_coords is not None:
+        state = yield from go_to(table_coords, state)
+        for _ in range(4):
+            if state["info"]["inventory"].get("wood_pickaxe", 0) >= 1:
+                return state
+            if is_hostile_visible(state):
+                state = yield move_away_from_hostile(state)
+                break
+            state = yield craft("wood_pickaxe")
+    return state
+""",
+    "collect_stone": """\
+def collect_stone(state):
+    if state["info"]["inventory"].get("stone", 0) >= 1:
+        return state
+    if state["info"]["inventory"].get("wood_pickaxe", 0) < 1:
+        state = yield from make_wood_pickaxe(state)
+    if state["info"]["inventory"].get("wood_pickaxe", 0) < 1:
+        return state
+    stone_coords = get_memory().get("stone")
+    direction = 0
+    segment_len = 4
+    segment_progress = 0
+    turns = 0
+    for step in range(90):
+        if state["info"]["inventory"].get("stone", 0) >= 1:
+            return state
+        if is_hostile_visible(state):
+            state = yield move_away_from_hostile(state)
+            continue
+        visible_stone = find_nearest("stone", state)
+        if visible_stone is not None:
+            stone_coords = visible_stone
+            save_in_memory("stone", stone_coords)
+        if stone_coords is not None:
+            state = yield from go_to(stone_coords, state)
+            for _ in range(6):
+                if state["info"]["inventory"].get("stone", 0) >= 1:
+                    return state
+                if is_hostile_visible(state):
+                    state = yield move_away_from_hostile(state)
+                    break
+                state = yield do_action()
+            stone_coords = None
+            continue
+        if direction == 0:
+            state = yield move_right()
+        elif direction == 1:
+            state = yield move_down()
+        elif direction == 2:
+            state = yield move_left()
+        else:
+            state = yield move_up()
+        segment_progress += 1
+        if segment_progress >= segment_len:
+            direction = (direction + 1) % 4
+            segment_progress = 0
+            turns += 1
+            if turns % 2 == 0:
+                segment_len += 2
+    return state
+""",
+    "place_stone": """\
+def place_stone(state):
+    if state["info"]["achievements"].get("place_stone", 0):
+        return state
+    if state["info"]["inventory"].get("stone", 0) < 1:
+        state = yield from collect_stone(state)
+    if state["info"]["inventory"].get("stone", 0) < 1:
+        return state
+    home = get_home()
+    if home is not None:
+        state = yield from go_to(home, state)
+    table_coords = get_memory().get("table")
+    visible_table = find_nearest("table", state)
+    if visible_table is not None:
+        table_coords = visible_table
+        save_in_memory("table", table_coords)
+    if table_coords is not None:
+        state = yield from go_to(table_coords, state)
+    direction = 0
+    segment_len = 2
+    segment_progress = 0
+    turns = 0
+    for step in range(40):
+        if state["info"]["achievements"].get("place_stone", 0):
+            return state
+        if state["info"]["inventory"].get("stone", 0) < 1:
+            return state
+        if is_hostile_visible(state):
+            state = yield move_away_from_hostile(state)
+            continue
+        if can_place_ahead("stone", state):
+            state = yield place("stone")
+            return state
+        if direction == 0:
+            state = yield move_right()
+        elif direction == 1:
+            state = yield move_down()
+        elif direction == 2:
+            state = yield move_left()
+        else:
+            state = yield move_up()
+        segment_progress += 1
+        if segment_progress >= segment_len:
+            direction = (direction + 1) % 4
+            segment_progress = 0
+            turns += 1
+            if turns % 2 == 0:
+                segment_len += 1
     return state
 """,
     "survive": """\
@@ -340,13 +554,20 @@ def survive_first_night(state):
     segment_len = 4
     segment_progress = 0
     turns = 0
-    for step in range(160):
+    calm_steps = 0
+    for step in range(220):
         inv = state["info"]["inventory"]
+        if is_hostile_visible(state):
+            calm_steps = 0
+        else:
+            calm_steps += 1
         if (
             inv.get("health", 9) >= 8
-            and inv.get("food", 9) >= 7
-            and inv.get("drink", 9) >= 7
+            and inv.get("food", 9) >= 8
+            and inv.get("drink", 9) >= 8
+            and inv.get("energy", 9) >= 5
             and not is_hostile_visible(state)
+            and calm_steps >= 25
         ):
             return state
         if is_hostile_visible(state):
@@ -388,12 +609,21 @@ def survive_first_night(state):
                         break
                     state = yield do_action()
                 continue
-        if inv.get("energy", 9) < 4:
+        if inv.get("energy", 9) < 5:
             home = get_home()
             if home is not None:
                 state = yield from go_to(home, state)
             if not is_hostile_visible(state):
                 state = yield sleep_action()
+            continue
+        home = get_home()
+        if home is not None and calm_steps < 25:
+            state = yield from go_to(home, state)
+            if state["info"]["inventory"].get("stone", 0) > 0 and can_place_ahead("stone", state):
+                state = yield place("stone")
+                continue
+            if not is_hostile_visible(state):
+                state = yield noop()
             continue
         if direction == 0:
             state = yield move_right()
@@ -580,6 +810,7 @@ def bootstrap_initial_skills(
                         code=deterministic_code,
                         task=spec.description,
                         deduplicate=False,
+                        origin="bootstrap",
                     )
                 except TypeError:
                     result = skill_manager.save(
@@ -671,6 +902,7 @@ def bootstrap_initial_skills(
                     code=call.code,
                     task=spec.description,
                     deduplicate=False,
+                    origin="bootstrap",
                 )
             except TypeError:
                 result = skill_manager.save(

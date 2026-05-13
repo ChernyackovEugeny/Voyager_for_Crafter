@@ -44,6 +44,9 @@ class CrafterEnv:
         """
         obs, reward, done, info = self._env.step(action)
         info["view_size"] = self.view_size
+        player = getattr(self._env, "_player", None)
+        if player is not None:
+            info["player_facing"] = tuple(int(value) for value in player.facing)
         return obs, reward, bool(done), False, info
 
     def close(self):

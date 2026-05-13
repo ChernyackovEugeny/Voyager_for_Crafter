@@ -59,6 +59,18 @@ class SkillManagerTests(unittest.TestCase):
             result.skill.description,
             "collect wood. Uses: do_action",
         )
+        self.assertEqual(result.skill.origin, "generated")
+
+    def test_save_can_mark_bootstrap_origin(self):
+        result = self.manager.save(
+            name="collect_wood",
+            code="def f(state):\n    state = yield do_action()\n",
+            task="collect wood",
+            origin="bootstrap",
+        )
+
+        self.assertEqual(result.skill.origin, "bootstrap")
+        self.assertEqual(self.repo.get("collect_wood").origin, "bootstrap")
 
     def test_save_duplicate_name_rejected(self):
         self.manager.save(name="one", code="def f(state): yield 0", task="collect wood")

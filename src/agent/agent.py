@@ -43,6 +43,7 @@ class Agent:
         self.current_task = None
         self.current_skill = None
         self._last_result = None
+        self._failed_reused_skill = None
         self._episode_num = 1
 
     def run(self, *, episode_num: int = 1) -> dict[str, Any]:
@@ -56,6 +57,7 @@ class Agent:
         episode_steps = 0
         episode_reward = 0.0
         skipped_task_keys: set[str] = set()
+        blocked_reuse: dict[str, set[str]] = {}
         consecutive_failures: dict[str, int] = {}
         all_tasks_done = False
 
@@ -72,7 +74,11 @@ class Agent:
 
             self.current_task = task
             logger.info("[Agent] task: %s | %s", task.name, task.description)
-            done, state, skipped = self.step(state, task)
+            done, state, skipped = self.step(
+                state,
+                task,
+                blocked_skill_names=blocked_reuse.get(task.skip_key, set()),
+            )
             if self._last_result is not None:
                 episode_steps += self._last_result.steps
                 episode_reward += self._last_result.total_reward
@@ -80,6 +86,10 @@ class Agent:
             if skipped:
                 skipped_task_keys.add(task.skip_key)
             if not task_complete:
+                if self._failed_reused_skill is not None:
+                    blocked_reuse.setdefault(task.skip_key, set()).add(
+                        self._failed_reused_skill
+                    )
                 consecutive_failures[task.skip_key] = (
                     consecutive_failures.get(task.skip_key, 0) + 1
                 )
@@ -140,9 +150,27 @@ class Agent:
         self,
         state: dict[str, Any],
         task,
+        *,
+        blocked_skill_names: set[str] | frozenset[str] = frozenset(),
     ) -> tuple[bool, dict[str, Any], bool]:
         """Run one task attempt and return (episode_done, final_state, skipped)."""
         candidates = self.skill_manager.retrieve(task.description)
+        self._failed_reused_skill = None
+        if blocked_skill_names:
+            before = len(candidates)
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.skill.name not in blocked_skill_names
+            ]
+            blocked = ", ".join(sorted(blocked_skill_names))
+            logger.info(
+                "[Agent] reuse blocked for %s: %s | candidates %d -> %d",
+                task.name,
+                blocked,
+                before,
+                len(candidates),
+            )
         self._last_result = None
         self._log_retrieval(candidates, task)
         source = self.strategy.acquire_skill(
@@ -173,6 +201,7 @@ class Agent:
             )
         except SkillLoadError as exc:
             logger.warning("[Agent] load failed: %s | %s", task.name, exc)
+            self._failed_reused_skill = source.reused_name
             failure_state = dict(state)
             failure_state["failure_reason"] = "load_error"
             failure_state["error_traceback"] = str(exc)
@@ -224,6 +253,7 @@ class Agent:
                 skill_manager=self.skill_manager,
             )
         else:
+            self._failed_reused_skill = source.reused_name
             failure_state = dict(final_state)
             failure_state["failure_reason"] = (
                 "task_incomplete"
@@ -233,6 +263,7 @@ class Agent:
             failure_state["error_traceback"] = result.error
             failure_state["executor_steps"] = result.steps
             failure_state["executor_reason"] = result.reason.value
+            failure_state["initial_info"] = state.get("info", {})
             call = self.strategy.on_task_failed(
                 task=task,
                 source=source,

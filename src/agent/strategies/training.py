@@ -18,9 +18,11 @@ class TrainingStrategy(AgentStrategy):
         "timeout",
         "health_low",
         "danger_visible",
+        "episode_done",
         "stagnation",
         "task_incomplete",
     }
+    _SURVIVAL_PARTIAL_SAVE_STEPS = 80
 
     def __init__(
         self,
@@ -164,6 +166,13 @@ class TrainingStrategy(AgentStrategy):
         )
         if fixed is not None:
             return fixed
+        partial = self._survival_partial_progress(task=task, state=state)
+        if partial is not None:
+            logger.info(
+                "[Agent] survival partial progress: %s | saving generated skill",
+                partial,
+            )
+            self._save_new_skill(task, source.code, skill_manager)
         self._last_codegen_failure[task.name] = self._failure_memory(source, state)
         return None
 
@@ -434,6 +443,41 @@ class TrainingStrategy(AgentStrategy):
             reason = f"{reason}: {first_line}"
         return source.code, reason
 
+    def _survival_partial_progress(self, *, task, state: dict) -> str | None:
+        if getattr(task, "name", None) != "survive":
+            return None
+        reason = str(state.get("failure_reason") or "")
+        if reason in {"error", "load_error"}:
+            return None
+        steps = int(state.get("executor_steps", 0) or 0)
+        if steps <= 0:
+            return None
+
+        initial_inventory = (state.get("initial_info", {}) or {}).get(
+            "inventory", {}
+        ) or {}
+        final_inventory = (state.get("info", {}) or {}).get("inventory", {}) or {}
+        final_health = int(final_inventory.get("health", 0) or 0)
+        if final_health <= 0:
+            return None
+
+        improved = []
+        for key in ("health", "food", "drink", "energy"):
+            before = int(initial_inventory.get(key, 0) or 0)
+            after = int(final_inventory.get(key, 0) or 0)
+            if after > before:
+                improved.append(f"{key}+{after - before}")
+        if improved:
+            return ", ".join(improved)
+
+        executor_reason = str(state.get("executor_reason") or reason)
+        if (
+            steps >= self._SURVIVAL_PARTIAL_SAVE_STEPS
+            and executor_reason in {"timeout", "stagnation", "task_incomplete"}
+        ):
+            return f"alive_for_{steps}_steps"
+        return None
+
     @staticmethod
     def _state_text(state: dict) -> str:
         info = state.get("info", {}) or {}
@@ -466,13 +510,17 @@ class TrainingStrategy(AgentStrategy):
         if skill is None:
             logger.info("[Agent] reflection skipped: skill missing")
             return None
-        if skill.name in self._protected_reflection_skill_names:
+        is_survival_controller = _is_survival_controller_name(skill.name)
+        if (
+            skill.name in self._protected_reflection_skill_names
+            and not is_survival_controller
+        ):
             logger.info(
                 "[Agent] reflection skipped: protected bootstrap skill %s",
                 skill.name,
             )
             return None
-        if skill.success_count <= 0:
+        if skill.success_count <= 0 and not is_survival_controller:
             logger.info("[Agent] reflection skipped: skill has no prior success")
             return None
         if skill.reflected_count >= self._max_reflections_per_skill:
@@ -651,23 +699,12 @@ def _candidate_matches_task(task, candidate) -> bool:
 
     task_name = getattr(task, "name", "")
     if task_name == "survive":
-        return (
-            skill_name == "survive"
-            or skill_name.startswith("survive_v")
-            or skill_name in _SURVIVAL_SKILL_NAMES
-            or any(skill_name.startswith(f"{name}_v") for name in _SURVIVAL_SKILL_NAMES)
-        )
+        return _is_survival_controller_name(skill_name)
 
     return True
 
 
-_SURVIVAL_SKILL_NAMES = {
-    "collect_drink",
-    "restore_drink",
-    "restore_food",
-    "eat_cow",
-    "secure_water",
-    "secure_food",
-    "build_shelter",
-    "survival_routine",
-}
+def _is_survival_controller_name(skill_name: str | None) -> bool:
+    if skill_name is None:
+        return False
+    return skill_name == "survive" or skill_name.startswith("survive_v")

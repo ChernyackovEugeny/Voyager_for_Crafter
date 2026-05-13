@@ -26,6 +26,10 @@ Rules:
   - Keep the same function name and signature whenever possible.
   - Preserve the original task purpose.
   - Prefer small, robust changes over broad rewrites.
+  - For failed survival skills, specifically look for over-fleeing. Improve the
+    policy so it can block with placed stone/table when available, fight an
+    isolated zombie when armed and healthy enough, and flee mainly from
+    skeletons/arrows or unsafe fights.
   - Do not add explanations outside the code fence.
   - Return exactly one corrected Python function in a ```python code fence.
 """

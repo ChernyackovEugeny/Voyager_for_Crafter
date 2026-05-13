@@ -75,6 +75,7 @@ _CALL_ARG_COUNTS: dict[str, tuple[int, int]] = {
     "sleep_action": (0, 0),
     "craft": (1, 1),
     "place": (1, 1),
+    "can_place_ahead": (2, 2),
     "find_nearest": (2, 2),
     "find_nearest_hostile": (1, 1),
     "go_to": (2, 2),

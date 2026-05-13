@@ -33,4 +33,5 @@ class SkillRecord(BaseModel):
     reflected_count: int = 0
     fix_count: int = 0
     episodic_score: float = 0.0
+    origin: str = "generated"
     created_at: datetime = Field(default_factory=_utcnow)

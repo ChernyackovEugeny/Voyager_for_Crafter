@@ -43,6 +43,14 @@ def _task():
     )
 
 
+def _survive_task():
+    return Task(
+        name="survive",
+        description="Restore survival stats and avoid visible enemies.",
+        achievement_key=None,
+    )
+
+
 def _candidate(similarity, name="collect_wood"):
     skill = SkillRecord(
         name=name,
@@ -91,6 +99,18 @@ class InferenceStrategyTests(unittest.TestCase):
             obs=None,
             info={},
             candidates=[_candidate(0.95, name="collect_wood_2")],
+        )
+
+        self.assertIsNone(source)
+
+    def test_survive_does_not_reuse_narrow_survival_subskill(self):
+        strategy = InferenceStrategy(reuse_threshold=0.85)
+
+        source = strategy.acquire_skill(
+            task=_survive_task(),
+            obs=None,
+            info={},
+            candidates=[_candidate(0.95, name="collect_drink")],
         )
 
         self.assertIsNone(source)

@@ -39,6 +39,7 @@ ACTION_PRIMITIVE_NAMES: frozenset[str] = frozenset({
     "sleep_action",
     "craft",
     "place",
+    "can_place_ahead",
     "find_nearest",
     "find_nearest_hostile",
     "go_to",
@@ -116,6 +117,27 @@ def craft(item: str) -> int:
 def place(item: str) -> int:
     """Return the action integer for placing `item`. KeyError on unknown item."""
     return _PLACE_ACTIONS[item]
+
+
+def can_place_ahead(item: str, state: dict) -> bool:
+    """Return True when the tile in front can accept the requested place action."""
+    info = _C.place[item]
+    pos = state["info"].get("player_pos")
+    facing = state["info"].get("player_facing")
+    semantic = state["info"].get("semantic")
+    if pos is None or facing is None or semantic is None:
+        return False
+    tx = int(pos[0]) + int(facing[0])
+    ty = int(pos[1]) + int(facing[1])
+    if not (0 <= tx < _MAP_W and 0 <= ty < _MAP_H):
+        return False
+    material_name = None
+    tile_id = int(semantic[tx, ty])
+    for name in info["where"]:
+        if _NAME_TO_ID.get(name) == tile_id:
+            material_name = name
+            break
+    return material_name is not None
 
 
 # ---------------------------------------------------------------------------
@@ -352,4 +374,4 @@ def go_to(target_coords: tuple, state: dict):
 
         # Path exhausted but not arrived → replan (outer loop).
 
-    return state  # gave up after MAX_REPLANS
+    return state

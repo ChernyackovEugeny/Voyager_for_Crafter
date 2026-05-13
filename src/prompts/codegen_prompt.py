@@ -86,6 +86,14 @@ Placement:
   place("stone")    — costs 1 stone;   valid ground: grass, sand, path, water, lava
   place("plant")    — costs 1 sapling; valid ground: grass only
 
+Defensive placement is a core survival ability, not just an achievement.
+The agent can place blocks and structures to make obstacles, seal gaps, and
+create a small night shelter. If monsters are visible at night and the agent
+has stone, use `can_place_ahead("stone", state)` and `place("stone")` to block
+approach paths near home or while retreating. A placed table or furnace is also
+a physical obstacle and a home-base anchor, but stone is preferred for blocking
+because it costs only one stone and can be placed on more terrain types.
+
 Crafting (player must be adjacent to required structure):
   craft("wood_pickaxe")   — nearby: table;           uses: 1 wood
   craft("stone_pickaxe")  — nearby: table;           uses: 1 wood + 1 stone
@@ -155,6 +163,11 @@ All primitives below are available in every skill function without imports.
 
   place(item: str) -> int
       item values: "stone", "table", "furnace", "plant"
+
+  can_place_ahead(item: str, state: dict) -> bool
+      True if the tile directly in front of the player can accept that place
+      action. For table/furnace placement, check this before yielding place().
+      For defensive stone placement, check it before `place("stone")` as well.
 
 ### Navigation
 
@@ -307,6 +320,16 @@ sub-skill is available.
 For survival tasks, prioritize staying alive over unlocking achievements:
 restore drink and food, avoid visible hostiles, return to remembered water or
 home when possible, and only then continue the requested objective.
+The agent is capable of placing blocks. When threatened at night, do not only
+run in open terrain: if inventory has stone, place stone to close a gap, block
+a direct path, or build a small barrier near home; if no stone is available but
+wood is available, placing a table can create a temporary obstacle and home
+anchor. After every placement, update state and re-check hostile visibility.
+Do not reflexively abandon the current plan for every hostile. If exactly one
+zombie is the visible threat, health is reasonable, and the agent has any sword,
+go adjacent with `go_to`, face it, and use `do_action()` several times to kill
+it. Prefer blocking or fighting over endless fleeing when the inventory makes
+that safe. Still avoid skeletons/arrows unless well protected.
 Do not treat an already unlocked survival achievement as proof that the current
 stat is safe. If the task is to restore drink or food, continue drinking or
 eating until the inventory stat reaches the requested threshold even when
@@ -336,6 +359,11 @@ Do not call `explore_for`; it is not available.
 - Apply the yield/send protocol correctly (`state = yield <action>`).
 - The function should usually yield many actions, not just one.
 - If a target is not visible, explore in a loop and keep checking again.
+- For survival at night, consider defensive placement. The agent can place
+  stone/table/furnace/plant using `place(...)`; use stone blocks to seal
+  routes or make a small shelter when monsters are visible and stone exists.
+- If the visible threat is a single zombie and the agent has a sword and enough
+  health, fighting with repeated `do_action()` can be better than fleeing.
 - Do not call unknown helpers such as `explore_for`, `chop_tree`, or
   `drink_water`. Only use listed primitives and retrieved learned skills.
 - Do not invent helper functions like `find_water`, `go_to_water`,
@@ -454,6 +482,65 @@ def collect_drink(state):
             if state["info"]["achievements"].get("collect_drink", 0):
                 return
             state = yield do_action()
+```
+
+### Example 4 - Night shelter with defensive stone placement
+
+```python
+def survive_by_blocking_monsters(state):
+    calm_steps = 0
+    for step in range(90):
+        inv = state["info"]["inventory"]
+        if (
+            inv.get("health", 9) >= 8
+            and inv.get("food", 9) >= 7
+            and inv.get("drink", 9) >= 7
+            and not is_hostile_visible(state)
+            and calm_steps >= 20
+        ):
+            return state
+
+        if is_hostile_visible(state):
+            calm_steps = 0
+            zombie = find_nearest("zombie", state)
+            skeleton = find_nearest("skeleton", state)
+            arrow = find_nearest("arrow", state)
+            has_sword = (
+                inv.get("wood_sword", 0) > 0
+                or inv.get("stone_sword", 0) > 0
+                or inv.get("iron_sword", 0) > 0
+            )
+            if (
+                zombie is not None
+                and skeleton is None
+                and arrow is None
+                and has_sword
+                and inv.get("health", 9) >= 5
+            ):
+                state = yield from go_to(zombie, state)
+                for _ in range(5):
+                    if not is_hostile_visible(state):
+                        break
+                    state = yield do_action()
+                continue
+            if inv.get("stone", 0) > 0 and can_place_ahead("stone", state):
+                state = yield place("stone")
+                continue
+            if inv.get("wood", 0) >= 2 and can_place_ahead("table", state):
+                state = yield place("table")
+                set_home(get_position(state))
+                continue
+            state = yield move_away_from_hostile(state)
+            continue
+
+        calm_steps += 1
+        home = get_home()
+        if home is not None:
+            state = yield from go_to(home, state)
+            continue
+        set_home(get_position(state))
+        state = yield noop()
+    return state
 ```
 """
 

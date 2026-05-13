@@ -89,8 +89,10 @@ class FakeStrategy:
         self.unavailable = []
         self.completed = []
         self.failed = []
+        self.candidate_names = []
 
     def acquire_skill(self, *, task, obs, info, candidates):
+        self.candidate_names.append([candidate.skill.name for candidate in candidates])
         if self.sources:
             return self.sources.pop(0)
         return None
@@ -440,6 +442,29 @@ class AgentTests(unittest.TestCase):
         # After 3 failures, collect-wood should be in skipped, agent moves on.
         self.assertIn("collect_wood", summary["skipped_tasks"])
         self.assertEqual(strategy.failed[3][0], "collect-stone")
+
+    def test_failed_reused_skill_is_blocked_for_same_task_in_episode(self):
+        collect = _task("collect-wood", "collect_wood")
+        manager = FakeSkillManager(candidates=[
+            _candidate("bad_wood", 0.95),
+            _candidate("backup_wood", 0.90),
+        ])
+        strategy = FakeStrategy([
+            SkillSource(code=_skill_code(), reused_name="bad_wood"),
+            SkillSource(code=_skill_code(), reused_name="backup_wood"),
+        ])
+        agent = _agent(
+            curriculum=FakeCurriculum([collect, collect]),
+            skill_manager=manager,
+            strategy=strategy,
+            executor=FakeExecutor(complete=False),
+            max_iterations=2,
+        )
+
+        agent.run()
+
+        self.assertEqual(strategy.candidate_names[0], ["bad_wood", "backup_wood"])
+        self.assertEqual(strategy.candidate_names[1], ["backup_wood"])
 
 
 if __name__ == "__main__":

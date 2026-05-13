@@ -94,23 +94,6 @@ def _candidate_matches_task(task, candidate) -> bool:
 
     task_name = getattr(task, "name", "")
     if task_name == "survive":
-        return (
-            skill_name == "survive"
-            or skill_name.startswith("survive_v")
-            or skill_name in _SURVIVAL_SKILL_NAMES
-            or any(skill_name.startswith(f"{name}_v") for name in _SURVIVAL_SKILL_NAMES)
-        )
+        return skill_name == "survive" or skill_name.startswith("survive_v")
 
     return True
-
-
-_SURVIVAL_SKILL_NAMES = {
-    "collect_drink",
-    "restore_drink",
-    "restore_food",
-    "eat_cow",
-    "secure_water",
-    "secure_food",
-    "build_shelter",
-    "survival_routine",
-}

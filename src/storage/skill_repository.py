@@ -294,6 +294,7 @@ class ChromaSkillRepository:
             "reflected_count": int(s.reflected_count),
             "fix_count": int(s.fix_count),
             "episodic_score": float(s.episodic_score),
+            "origin": s.origin,
             "created_at": s.created_at.isoformat(),
         }
 
@@ -308,5 +309,6 @@ class ChromaSkillRepository:
             reflected_count=int(meta.get("reflected_count", 0)),
             fix_count=int(meta.get("fix_count", 0)),
             episodic_score=float(meta.get("episodic_score", 0.0)),
+            origin=str(meta.get("origin", "generated")),
             created_at=datetime.fromisoformat(meta["created_at"]),
         )

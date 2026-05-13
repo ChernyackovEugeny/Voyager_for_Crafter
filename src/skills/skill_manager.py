@@ -36,6 +36,7 @@ class SkillManager:
         code: str,
         task: str,
         deduplicate: bool = True,
+        origin: str = "generated",
     ) -> SaveResult:
         """Try to save a generated skill, rejecting duplicates."""
         if self._repo.get(name) is not None:
@@ -64,7 +65,12 @@ class SkillManager:
                 similarity=dup_sim,
             )
 
-        skill = SkillRecord(name=name, code=code, description=description)
+        skill = SkillRecord(
+            name=name,
+            code=code,
+            description=description,
+            origin=origin,
+        )
         self._repo.add(skill, self._normalize_vector(embedding))
         logger.info("SkillManager.save: %r added", name)
         return SaveResult(saved=True, outcome="ok", skill=skill)
