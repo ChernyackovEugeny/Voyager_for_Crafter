@@ -39,7 +39,7 @@ class FakeCurriculum:
         if info.get("achievements", {}).get("collect_wood"):
             return None
         for task in self.tasks:
-            if task.achievement_key not in skip:
+            if task.skip_key not in skip:
                 return task
         return None
 
@@ -104,21 +104,31 @@ class FakeStrategy:
 
 
 class FakeExecutor:
-    def __init__(self, *, complete, reason=InterruptReason.COMPLETED):
+    def __init__(self, *, complete, reason=InterruptReason.COMPLETED, steps=1):
         self.complete = complete
         self.reason = reason
+        self.steps = steps
         self.calls = []
         self.render_state_calls = 0
 
     def render_state(self, env):
         self.render_state_calls += 1
 
-    def run(self, skill, env, initial_state):
+    def run(
+        self,
+        skill,
+        env,
+        initial_state,
+        *,
+        health_interrupt_enabled=True,
+        danger_interrupt_enabled=False,
+        survival_progress_enabled=False,
+    ):
         self.calls.append((skill, initial_state))
         achievements = {"collect_wood": 1 if self.complete else 0}
         return ExecutionResult(
             reason=self.reason,
-            steps=1,
+            steps=self.steps,
             total_reward=0.0,
             final_state={"obs": "final_obs", "info": _state_info(achievements)},
         )
@@ -293,6 +303,21 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(run_logger.llm_calls[0]["episode_num"], 7)
         self.assertEqual(run_logger.llm_calls[0]["model"], "deepseek-v4-flash")
 
+    def test_generated_zero_step_completion_is_rejected(self):
+        strategy = FakeStrategy([
+            SkillSource(code=_skill_code(), generated=True)
+        ])
+        agent = _agent(
+            strategy=strategy,
+            executor=FakeExecutor(complete=True, steps=0),
+            max_iterations=1,
+        )
+
+        agent.run()
+
+        self.assertEqual(strategy.completed, [])
+        self.assertEqual(strategy.failed, [("collect-wood", None)])
+
     def test_max_iterations_stops_repeated_failures(self):
         curriculum = FakeCurriculum([_task()])
         strategy = FakeStrategy([
@@ -311,6 +336,55 @@ class AgentTests(unittest.TestCase):
 
         self.assertEqual(summary["iterations"], 3)
         self.assertEqual(len(curriculum.failures), 3)
+
+    def test_survive_failure_is_skipped_after_consecutive_limit(self):
+        survive = _task("survive", None)
+        collect = _task("collect-wood", "collect_wood")
+        curriculum = FakeCurriculum([survive, collect])
+        strategy = FakeStrategy([
+            SkillSource(code=_skill_code()),
+            SkillSource(code=_skill_code()),
+            SkillSource(code=_skill_code()),
+        ])
+        agent = _agent(
+            curriculum=curriculum,
+            strategy=strategy,
+            executor=FakeExecutor(complete=False),
+            max_iterations=3,
+        )
+        agent.max_consecutive_survive_failures = 2
+
+        summary = agent.run()
+
+        self.assertEqual(summary["iterations"], 3)
+        self.assertIn({"survive"}, curriculum.calls)
+        self.assertEqual(strategy.failed[0][0], "survive")
+        self.assertEqual(strategy.failed[1][0], "survive")
+        self.assertEqual(strategy.failed[2][0], "collect-wood")
+
+    def test_generic_task_skipped_after_consecutive_failures(self):
+        collect = _task("collect-wood", "collect_wood")
+        other = _task("collect-stone", "collect_stone")
+        curriculum = FakeCurriculum([collect, collect, collect, other])
+        strategy = FakeStrategy([
+            SkillSource(code=_skill_code()),
+            SkillSource(code=_skill_code()),
+            SkillSource(code=_skill_code()),
+            SkillSource(code=_skill_code()),
+        ])
+        agent = _agent(
+            curriculum=curriculum,
+            strategy=strategy,
+            executor=FakeExecutor(complete=False),
+            max_iterations=5,
+        )
+        agent.max_consecutive_task_failures = 3
+
+        summary = agent.run()
+
+        # After 3 failures, collect-wood should be in skipped, agent moves on.
+        self.assertIn("collect_wood", summary["skipped_tasks"])
+        self.assertEqual(strategy.failed[3][0], "collect-stone")
 
 
 if __name__ == "__main__":

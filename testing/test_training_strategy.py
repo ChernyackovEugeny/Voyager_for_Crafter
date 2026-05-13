@@ -19,11 +19,12 @@ class FakeCodeGen:
         self.fail = fail
         self.calls = []
 
-    def get_code(self, *, state_text, task, retrieved_skills):
+    def get_code(self, *, state_text, task, retrieved_skills, previous_failure=None):
         self.calls.append({
             "state_text": state_text,
             "task": task,
             "retrieved_skills": retrieved_skills,
+            "previous_failure": previous_failure,
         })
         if self.fail:
             raise RuntimeError("llm down")
@@ -166,6 +167,14 @@ def _task():
         name="collect-wood",
         description="Chop a tree to obtain wood.",
         achievement_key="collect_wood",
+    )
+
+
+def _place_table_task():
+    return Task(
+        name="place-table",
+        description="Place a crafting table on the ground (consumes 2 wood).",
+        achievement_key="place_table",
     )
 
 
@@ -445,7 +454,11 @@ class TrainingStrategyTests(unittest.TestCase):
         call = strategy.on_task_failed(
             task=_task(),
             source=source,
-            state={"info": _info(), "failure_reason": "timeout"},
+            state={
+                "info": _info(),
+                "failure_reason": "timeout",
+                "executor_steps": 50,
+            },
             skill_manager=manager,
             curriculum=curriculum,
         )
@@ -454,6 +467,39 @@ class TrainingStrategyTests(unittest.TestCase):
         self.assertEqual(len(reflection.calls), 1)
         self.assertEqual(manager.code_updates[0][0], "existing_wood")
         self.assertIn("yield 1", manager.code_updates[0][1])
+
+    def test_place_table_can_reflect_when_missing_wood_runtime_resource(self):
+        manager = FakeSkillManager()
+        manager.records["place_table"] = SkillRecord(
+            name="place_table",
+            code=_skill_code(),
+            description="Place a crafting table on the ground.",
+            success_count=1,
+        )
+        reflection = FakeReflection()
+        strategy = TrainingStrategy(
+            codegen=FakeCodeGen(),
+            reuse_threshold=0.85,
+            reflection=reflection,
+            reflection_enabled=True,
+        )
+
+        call = strategy.on_task_failed(
+            task=_place_table_task(),
+            source=type("Source", (), {
+                "reused_name": "place_table",
+                "code": _skill_code(),
+            })(),
+            state={
+                "info": _info() | {"inventory": {"wood": 1}},
+                "failure_reason": "stagnation",
+                "executor_steps": 15,
+            },
+            skill_manager=manager,
+            curriculum=FakeCurriculum(),
+        )
+
+        self.assertIs(call, reflection.call)
 
     def test_reused_failure_skips_reflection_after_limit(self):
         manager = FakeSkillManager()
@@ -530,6 +576,136 @@ class TrainingStrategyTests(unittest.TestCase):
         )
 
         self.assertEqual(manager.saved[0]["name"], "collect_wood_v3")
+
+    def test_reflection_skipped_when_executor_steps_below_threshold(self):
+        manager = FakeSkillManager()
+        manager.records["existing_wood"] = SkillRecord(
+            name="existing_wood",
+            code=_skill_code(),
+            description="Chop a tree to obtain wood.",
+            success_count=1,
+        )
+        reflection = FakeReflection()
+        strategy = TrainingStrategy(
+            codegen=FakeCodeGen(),
+            reuse_threshold=0.85,
+            reflection=reflection,
+            reflection_enabled=True,
+            max_reflections_per_skill=3,
+            min_reflection_steps=3,
+        )
+        source = strategy.acquire_skill(
+            task=_task(),
+            obs=None,
+            info=_info(),
+            candidates=[_candidate(similarity=0.9)],
+        )
+
+        call = strategy.on_task_failed(
+            task=_task(),
+            source=source,
+            state={
+                "info": _info(),
+                "failure_reason": "health_low",
+                "executor_steps": 1,
+            },
+            skill_manager=manager,
+            curriculum=FakeCurriculum(),
+        )
+
+        self.assertIsNone(call)
+        self.assertEqual(reflection.calls, [])
+
+    def test_zero_step_task_incomplete_can_reflect(self):
+        manager = FakeSkillManager()
+        manager.records["survive"] = SkillRecord(
+            name="survive",
+            code=_skill_code(),
+            description="Restore survival stats.",
+            success_count=1,
+        )
+        reflection = FakeReflection()
+        strategy = TrainingStrategy(
+            codegen=FakeCodeGen(),
+            reuse_threshold=0.85,
+            reflection=reflection,
+            reflection_enabled=True,
+            min_reflection_steps=3,
+        )
+
+        call = strategy.on_task_failed(
+            task=Task(
+                name="survive",
+                description="Restore survival stats.",
+                achievement_key=None,
+            ),
+            source=type("Source", (), {
+                "reused_name": "survive",
+                "code": _skill_code(),
+            })(),
+            state={
+                "info": _info(),
+                "failure_reason": "task_incomplete",
+                "executor_steps": 0,
+            },
+            skill_manager=manager,
+            curriculum=FakeCurriculum(),
+        )
+
+        self.assertIs(call, reflection.call)
+
+    def test_codegen_receives_previous_failure_on_retry(self):
+        codegen = FakeCodeGen()
+        strategy = TrainingStrategy(codegen=codegen, reuse_threshold=0.85)
+        task = _task()
+
+        source1 = strategy.acquire_skill(
+            task=task, obs=None, info=_info(), candidates=[],
+        )
+        self.assertIsNone(codegen.calls[0]["previous_failure"])
+
+        strategy.on_task_failed(
+            task=task,
+            source=source1,
+            state={"info": _info(), "failure_reason": "health_low"},
+            skill_manager=FakeSkillManager(),
+            curriculum=FakeCurriculum(),
+        )
+
+        strategy.acquire_skill(
+            task=task, obs=None, info=_info(), candidates=[],
+        )
+        prev = codegen.calls[1]["previous_failure"]
+        self.assertIsNotNone(prev)
+        self.assertEqual(prev[0], source1.code)
+        self.assertEqual(prev[1], "health_low")
+
+    def test_previous_failure_cleared_on_task_success(self):
+        codegen = FakeCodeGen()
+        strategy = TrainingStrategy(codegen=codegen, reuse_threshold=0.85)
+        task = _task()
+
+        source1 = strategy.acquire_skill(
+            task=task, obs=None, info=_info(), candidates=[],
+        )
+        strategy.on_task_failed(
+            task=task,
+            source=source1,
+            state={"info": _info(), "failure_reason": "timeout"},
+            skill_manager=FakeSkillManager(),
+            curriculum=FakeCurriculum(),
+        )
+        # Now mark success — buffer should clear.
+        strategy.on_task_completed(
+            task=task,
+            source=source1,
+            skill_manager=FakeSkillManager(),
+        )
+
+        strategy.acquire_skill(
+            task=task, obs=None, info=_info(), candidates=[],
+        )
+        self.assertIsNone(codegen.calls[-1]["previous_failure"])
 
 
 if __name__ == "__main__":

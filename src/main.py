@@ -1,4 +1,70 @@
-"""Application entry point."""
+"""Точка входа CLI для запуска агента в среде Crafter.
+
+Как запустить:
+    python -m src.main [АРГУМЕНТЫ]
+    python src/main.py [АРГУМЕНТЫ]
+
+Режимы:
+    - train (по умолчанию): агент может генерировать/фиксить навыки через LLM
+      и сохранять их в библиотеку.
+    - inference: только переиспользование уже сохраненных навыков.
+
+Аргументы:
+    --mode {train,inference}
+        Режим работы агента. По умолчанию: train.
+
+    --render
+        Включить визуализацию среды на каждом шаге.
+
+    --render-size INT
+        Размер окна рендера (пиксели). По умолчанию: 512.
+
+    --render-step-delay FLOAT
+        Задержка между рендер-кадрами в секундах. По умолчанию: 0.05.
+
+    --skill-library STR
+        Имя Chroma-коллекции для библиотеки навыков. Если не указано,
+        используется значение из конфигурации.
+
+    --episodes INT
+        Количество эпизодов в текущем запуске. Если не указано,
+        берется settings.analytics.episodes.
+
+    --seed INT
+        Seed окружения для воспроизводимого запуска.
+
+    --eval-id STR
+        Идентификатор evaluation-запуска (пишется в аналитические метаданные).
+
+    --eval-run-idx INT
+        Индекс training-run (пишется в аналитические метаданные).
+
+    --early-stop-window INT
+        Устаревший алиас для --early-stop-patience.
+
+    --early-stop-patience INT
+        Остановить сессию после N подряд эпизодов без новых достижений.
+        Если не указано, берется settings.analytics.early_stop_patience.
+
+Сценарии использования:
+    1) Базовое обучение:
+       python src/main.py --mode train
+
+    2) Инференс на существующей библиотеке навыков:
+       python src/main.py --mode inference --skill-library crafter_skills
+
+    3) Воспроизводимый запуск с фиксированным seed:
+       python src/main.py --seed 42 --episodes 5
+
+    4) Отладка с визуализацией:
+       python src/main.py --render --render-size 768 --render-step-delay 0.1
+
+    5) Evaluation-запуск с метаданными:
+       python src/main.py --eval-id exp_2026_05_13 --eval-run-idx 3
+
+    6) Ранний останов при отсутствии прогресса:
+       python src/main.py --episodes 20 --early-stop-patience 4
+"""
 from __future__ import annotations
 
 import argparse
@@ -14,7 +80,7 @@ from analytics.run_logger import RunLogger
 from config import get_settings
 from environment.wrapper import CrafterEnv
 from llm.codegen import CodeGen
-from llm.curriculum import HardcodedCurriculum
+from llm.curriculum import HardcodedCurriculum, SurvivalSettings
 from llm.fix_bug import FixBug
 from llm.reflection import Reflection
 from observability.logging_config import configure_logging
@@ -115,6 +181,10 @@ def main(argv: list[str] | None = None) -> None:
     executor = Executor(
         max_steps_per_skill=settings.executor.max_steps_per_skill,
         health_threshold=settings.executor.health_interrupt_threshold,
+        stagnation_window=settings.executor.stagnation_window,
+        min_steps_before_health_interrupt=(
+            settings.executor.min_steps_before_health_interrupt
+        ),
         render=args.render,
         render_size=args.render_size,
         render_delay_s=args.render_step_delay,
@@ -165,6 +235,7 @@ def main(argv: list[str] | None = None) -> None:
                     code,
                     runtime=SkillRuntime(memory=memory),
                 ),
+                min_reflection_steps=settings.executor.min_reflection_steps,
             )
         else:
             strategy = InferenceStrategy(
@@ -172,13 +243,31 @@ def main(argv: list[str] | None = None) -> None:
             )
         agent = Agent(
             env=env,
-            curriculum=HardcodedCurriculum(),
+            curriculum=HardcodedCurriculum(
+                survival=SurvivalSettings(
+                    enter_health=settings.survival.enter_health,
+                    enter_food=settings.survival.enter_food,
+                    enter_drink=settings.survival.enter_drink,
+                    exit_health=settings.survival.exit_health,
+                    exit_food=settings.survival.exit_food,
+                    exit_drink=settings.survival.exit_drink,
+                    max_consecutive_failures=(
+                        settings.survival.max_consecutive_failures
+                    ),
+                )
+            ),
             skill_manager=skill_manager,
             strategy=strategy,
             executor=executor,
             memory=memory,
             max_iterations_per_episode=(
                 settings.executor.max_iterations_per_episode
+            ),
+            max_consecutive_survive_failures=(
+                settings.survival.max_consecutive_failures
+            ),
+            max_consecutive_task_failures=(
+                settings.executor.max_consecutive_task_failures
             ),
             run_logger=run_log,
         )

@@ -185,6 +185,18 @@ All primitives below are available in every skill function without imports.
   get_position(state: dict) -> tuple
       Returns state["info"]["player_pos"] — the player's (x, y) coordinates.
 
+### Self-awareness and danger
+
+  is_hostile_visible(state: dict) -> bool
+      True if a zombie, skeleton, or arrow is visible.
+
+  find_nearest_hostile(state: dict) -> tuple | None
+      Returns the nearest visible zombie, skeleton, or arrow coordinate.
+
+  move_away_from_hostile(state: dict) -> int
+      Returns one movement action that increases distance from the nearest
+      visible hostile when possible. Use as `state = yield move_away_from_hostile(state)`.
+
 ### Spatial Memory
 
   get_memory() -> dict
@@ -280,6 +292,14 @@ one exploratory movement just because the target is not visible. Use bounded
 loops (usually 20-80 environment steps) to explore, re-check perception, move
 to the target, and interact repeatedly. The Executor already has a hard timeout,
 so bounded loops are safe.
+
+Skills must be self-aware. Before expensive navigation, combat, sleeping, or
+resource collection, inspect `state["info"]["inventory"]`, current achievements,
+and hostile visibility. If a hostile is visible and the task is not specifically
+to fight it, move away for a few steps and re-check the actual state after each
+yield. For crafting and placement tasks, verify current inventory counts and
+collect missing resources inside the same skill when a suitable learned
+sub-skill is available.
 
 If the task target is not visible in the current observation, the correct
 behavior is exploration inside the same skill execution, not immediate return.
@@ -384,6 +404,7 @@ def format_user_prompt(
     state_text: str,
     task: str,
     retrieved_skills: list[dict],
+    previous_failure: tuple[str, str] | None = None,
 ) -> str:
     """
     Build the user message for get_code.
@@ -395,13 +416,32 @@ def format_user_prompt(
                            e.g. "collect 5 wood" or "make a stone pickaxe".
         retrieved_skills:  List of skill dicts from the vector DB.
                            Each dict has keys: "name", "description", "code".
+        previous_failure:  Optional (broken_code, failure_reason) from a prior
+                           failed attempt at this task. When present, an extra
+                           section is appended asking for a different approach.
     """
     skills_block = _format_retrieved_skills(retrieved_skills)
+    previous_block = ""
+    if previous_failure is not None:
+        broken_code, failure_reason = previous_failure
+        previous_block = (
+            "## Previous Attempt For This Task Failed\n"
+            f"Failure reason: {failure_reason}\n"
+            "Broken code:\n"
+            f"```python\n{broken_code}\n```\n"
+            "Write a different approach. Do not repeat the same logic — "
+            "vary the strategy, sequencing, or sub-skill choices.\n\n"
+        )
     return (
         f"## Current Game State\n{state_text}\n\n"
         f"## Task\n{task}\n\n"
-        f"## Previously Learned Skills (use as building blocks if relevant)\n"
+        f"## Previously Learned Skills (callable by name from your function)\n"
+        f"The skills listed below are pre-loaded into your runtime namespace\n"
+        f"alongside the primitives. You can call them directly as sub-skills\n"
+        f"with `yield from <skill_name>(state)` and they will return the\n"
+        f"updated state. Treat them as additional building blocks.\n\n"
         f"{skills_block}\n\n"
+        f"{previous_block}"
         f"## Your Job\n"
         f"Write a Python generator function to accomplish the task above.\n"
         f"Follow all format and protocol rules from the system prompt exactly."

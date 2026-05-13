@@ -8,6 +8,7 @@ import time
 import traceback as tb_mod
 from typing import Any, Callable
 
+from environment.danger import hostile_visible
 from environment.render_viewer import RenderViewer
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,8 @@ class InterruptReason(str, Enum):
     COMPLETED = "completed"
     TIMEOUT = "timeout"
     HEALTH_LOW = "health_low"
+    DANGER_VISIBLE = "danger_visible"
+    STAGNATION = "stagnation"
     EPISODE_DONE = "episode_done"
     ERROR = "error"
 
@@ -43,6 +46,8 @@ class Executor:
         render_size: int = 512,
         render_delay_s: float = 0.05,
         render_viewer=None,
+        stagnation_window: int = 0,
+        min_steps_before_health_interrupt: int = 0,
     ) -> None:
         self._max_steps = max_steps_per_skill
         self._health_threshold = health_threshold
@@ -51,17 +56,28 @@ class Executor:
         self._render_delay_s = render_delay_s
         self._render_viewer = render_viewer
         self._render_warning_logged = False
+        self._stagnation_window = stagnation_window
+        self._min_steps_before_health_interrupt = min_steps_before_health_interrupt
 
     def run(
         self,
         skill: Callable[[dict[str, Any]], Any],
         env,
         initial_state: dict[str, Any],
+        *,
+        health_interrupt_enabled: bool = True,
+        danger_interrupt_enabled: bool = False,
+        survival_progress_enabled: bool = False,
     ) -> ExecutionResult:
         obs = initial_state.get("obs")
         info = dict(initial_state.get("info", {}))
         state = {"obs": obs, "info": info}
         achievements_before = self._unlocked(info)
+        last_progress = self._progress_signature(
+            info,
+            include_survival_stats=survival_progress_enabled,
+        )
+        stagnant_steps = 0
         steps = 0
         total_reward = 0.0
 
@@ -86,10 +102,46 @@ class Executor:
                         info,
                         achievements_before,
                     )
-                if self._health(info) <= self._health_threshold:
+                if danger_interrupt_enabled and hostile_visible(info):
+                    logger.info("executor: danger interrupt at step %d", steps)
+                    return self._make_result(
+                        InterruptReason.DANGER_VISIBLE,
+                        steps,
+                        total_reward,
+                        obs,
+                        info,
+                        achievements_before,
+                    )
+                if (
+                    health_interrupt_enabled
+                    and steps >= self._min_steps_before_health_interrupt
+                    and self._health(info) <= self._health_threshold
+                ):
                     logger.info("executor: health interrupt at step %d", steps)
                     return self._make_result(
                         InterruptReason.HEALTH_LOW,
+                        steps,
+                        total_reward,
+                        obs,
+                        info,
+                        achievements_before,
+                    )
+                progress = self._progress_signature(
+                    info,
+                    include_survival_stats=survival_progress_enabled,
+                )
+                if progress == last_progress:
+                    stagnant_steps += 1
+                else:
+                    stagnant_steps = 0
+                last_progress = progress
+                if (
+                    self._stagnation_window > 0
+                    and stagnant_steps >= self._stagnation_window
+                ):
+                    logger.info("executor: stagnation interrupt at step %d", steps)
+                    return self._make_result(
+                        InterruptReason.STAGNATION,
                         steps,
                         total_reward,
                         obs,
@@ -165,6 +217,49 @@ class Executor:
         if "health" in inventory:
             return int(inventory["health"])
         return int(info.get("health", 99))
+
+    @classmethod
+    def _progress_signature(
+        cls,
+        info: dict[str, Any],
+        *,
+        include_survival_stats: bool = False,
+    ) -> tuple[Any, ...]:
+        signature = (
+            cls._position(info),
+            cls._item_signature(info),
+            tuple(sorted(cls._unlocked(info))),
+        )
+        if include_survival_stats:
+            signature += (cls._survival_signature(info),)
+        return signature
+
+    @staticmethod
+    def _position(info: dict[str, Any]) -> tuple[int, ...] | None:
+        position = info.get("player_pos")
+        if position is None:
+            return None
+        return tuple(int(value) for value in position)
+
+    @staticmethod
+    def _item_signature(info: dict[str, Any]) -> tuple[tuple[str, int], ...]:
+        stats = {"health", "food", "drink", "energy"}
+        inventory = info.get("inventory", {})
+        return tuple(
+            sorted(
+                (key, int(value))
+                for key, value in inventory.items()
+                if key not in stats
+            )
+        )
+
+    @staticmethod
+    def _survival_signature(info: dict[str, Any]) -> tuple[tuple[str, int], ...]:
+        inventory = info.get("inventory", {})
+        return tuple(
+            (key, int(inventory.get(key, 0) or 0))
+            for key in ("health", "food", "drink", "energy")
+        )
 
     def _render_frame(self, env) -> None:
         if not self._render:

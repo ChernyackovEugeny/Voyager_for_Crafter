@@ -142,5 +142,30 @@ class TestSkillLoader(unittest.TestCase):
         )
 
 
+    def test_extra_skill_becomes_callable_in_main(self):
+        helper = (
+            "def chop_tree(state):\n"
+            "    state = yield 5\n"
+            "    return state\n"
+        )
+        main = (
+            "def collect_wood(state):\n"
+            "    state = yield from chop_tree(state)\n"
+        )
+        _, func = load_skill(main, extra_skills=[("chop_tree", helper)])
+        gen = func({})
+        self.assertEqual(next(gen), 5)
+
+    def test_invalid_extra_skill_does_not_block_main(self):
+        bad = "def broken(:\n    pass\n"
+        main = (
+            "def collect_wood(state):\n"
+            "    state = yield 0\n"
+        )
+        _, func = load_skill(main, extra_skills=[("broken", bad)])
+        gen = func({})
+        self.assertEqual(next(gen), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

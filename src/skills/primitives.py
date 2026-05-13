@@ -26,9 +26,11 @@ import crafter.constants as _C
 
 from environment.ids import NAME_TO_ID as _NAME_TO_ID, WALKABLE_IDS as _WALKABLE_IDS
 from environment.view import visible_semantic_window
+from environment.danger import HOSTILE_NAMES as _HOSTILE_NAMES, hostile_visible
 
 
 ACTION_PRIMITIVE_NAMES: frozenset[str] = frozenset({
+    "noop",
     "move_left",
     "move_right",
     "move_up",
@@ -39,8 +41,11 @@ ACTION_PRIMITIVE_NAMES: frozenset[str] = frozenset({
     "place",
     "find_nearest",
     "explore_for",
+    "find_nearest_hostile",
     "go_to",
     "get_position",
+    "is_hostile_visible",
+    "move_away_from_hostile",
 })
 
 MEMORY_PRIMITIVE_NAMES: frozenset[str] = frozenset({
@@ -77,6 +82,7 @@ _ACT_MOVE_UP    = _C.actions.index("move_up")
 _ACT_MOVE_DOWN  = _C.actions.index("move_down")
 _ACT_DO         = _C.actions.index("do")
 _ACT_SLEEP      = _C.actions.index("sleep")
+_ACT_NOOP       = _C.actions.index("noop")
 
 # (dx, dy) → action integer for BFS path construction.
 _DIR_TO_ACTION: dict[tuple[int, int], int] = {
@@ -94,6 +100,7 @@ _MAP_W, _MAP_H = 64, 64  # fixed world size (crafter default area)
 # Simple action-return functions (return int; skill yields the result)
 # ---------------------------------------------------------------------------
 
+def noop()         -> int: return _ACT_NOOP
 def move_left()    -> int: return _ACT_MOVE_LEFT
 def move_right()   -> int: return _ACT_MOVE_RIGHT
 def move_up()      -> int: return _ACT_MOVE_UP
@@ -152,6 +159,41 @@ def find_nearest(object_type: str, state: dict) -> tuple[int, int] | None:
     dists = np.abs(absolute_positions - np.array([px, py])).sum(axis=1)
     nearest = absolute_positions[np.argmin(dists)]
     return (int(nearest[0]), int(nearest[1]))
+
+
+def is_hostile_visible(state: dict) -> bool:
+    """Return True when a hostile entity or projectile is currently visible."""
+    return hostile_visible(state["info"])
+
+
+def find_nearest_hostile(state: dict) -> tuple[int, int] | None:
+    """Return the nearest visible hostile coordinate, preferring closest threat."""
+    targets = [
+        coords
+        for name in _HOSTILE_NAMES
+        for coords in [find_nearest(name, state)]
+        if coords is not None
+    ]
+    if not targets:
+        return None
+    px, py = get_position(state)
+    return min(targets, key=lambda coords: abs(coords[0] - px) + abs(coords[1] - py))
+
+
+def move_away_from_hostile(state: dict) -> int:
+    """
+    Return a movement action that increases Manhattan distance from the nearest
+    visible hostile when possible. Falls back to move_up.
+    """
+    threat = find_nearest_hostile(state)
+    if threat is None:
+        return move_up()
+    px, py = get_position(state)
+    dx = px - threat[0]
+    dy = py - threat[1]
+    if abs(dx) >= abs(dy):
+        return move_right() if dx >= 0 else move_left()
+    return move_down() if dy >= 0 else move_up()
 
 
 def explore_for(object_type: str, state: dict, max_steps: int = 80):

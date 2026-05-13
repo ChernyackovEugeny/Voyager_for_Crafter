@@ -6,7 +6,8 @@ from typing import Any
 
 from agent.executor import Executor, InterruptReason
 from agent.memory import SpatialMemory
-from analytics.log_utils import log_episode, log_llm_call_ok
+from analytics.log_utils import log_episode, log_llm_call_ok, log_task_attempt
+from environment.captioner import caption
 from skills.runner import SkillLoadError, SkillRuntime, load_skill
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,8 @@ class Agent:
         executor: Executor,
         memory: SpatialMemory,
         max_iterations_per_episode: int,
+        max_consecutive_survive_failures: int = 3,
+        max_consecutive_task_failures: int = 3,
         run_logger=None,
     ) -> None:
         self.env = env
@@ -34,6 +37,8 @@ class Agent:
         self.executor = executor
         self.memory = memory
         self.max_iterations_per_episode = max_iterations_per_episode
+        self.max_consecutive_survive_failures = max_consecutive_survive_failures
+        self.max_consecutive_task_failures = max_consecutive_task_failures
         self.run_logger = run_logger
         self.current_task = None
         self.current_skill = None
@@ -51,6 +56,7 @@ class Agent:
         episode_steps = 0
         episode_reward = 0.0
         skipped_task_keys: set[str] = set()
+        consecutive_failures: dict[str, int] = {}
 
         while not done and iterations < self.max_iterations_per_episode:
             task = self.curriculum.propose_task(
@@ -67,8 +73,27 @@ class Agent:
             if self._last_result is not None:
                 episode_steps += self._last_result.steps
                 episode_reward += self._last_result.total_reward
-            if skipped and task.achievement_key is not None:
-                skipped_task_keys.add(task.achievement_key)
+            task_complete = self.curriculum.is_task_complete(task, state["info"])
+            if skipped:
+                skipped_task_keys.add(task.skip_key)
+            if not task_complete:
+                consecutive_failures[task.skip_key] = (
+                    consecutive_failures.get(task.skip_key, 0) + 1
+                )
+                limit = (
+                    self.max_consecutive_survive_failures
+                    if task.name == "survive"
+                    else self.max_consecutive_task_failures
+                )
+                if consecutive_failures[task.skip_key] >= limit:
+                    skipped_task_keys.add(task.skip_key)
+                    logger.info(
+                        "[Agent] task skipped after %d consecutive failures: %s",
+                        consecutive_failures[task.skip_key],
+                        task.name,
+                    )
+            else:
+                consecutive_failures.pop(task.skip_key, None)
             iterations += 1
 
         if done:
@@ -137,6 +162,10 @@ class Agent:
             function_name, skill_func = load_skill(
                 source.code,
                 runtime=SkillRuntime(memory=self.memory),
+                extra_skills=[
+                    (candidate.skill.name, candidate.skill.code)
+                    for candidate in candidates
+                ],
             )
         except SkillLoadError as exc:
             logger.warning("[Agent] load failed: %s | %s", task.name, exc)
@@ -157,7 +186,14 @@ class Agent:
         if source.generated:
             logger.info("[Agent] codegen: generated function %s", function_name)
         logger.info("[Agent] execute: %s", self.current_skill)
-        result = self.executor.run(skill_func, self.env, state)
+        result = self.executor.run(
+            skill_func,
+            self.env,
+            state,
+            health_interrupt_enabled=(task.name != "survive"),
+            danger_interrupt_enabled=(task.name != "survive"),
+            survival_progress_enabled=(task.name == "survive"),
+        )
         self._last_result = result
         self._log_execution_result(result)
         final_state = result.final_state
@@ -165,6 +201,14 @@ class Agent:
             task,
             final_state["info"],
         )
+        if result.reason == InterruptReason.ERROR:
+            task_complete = False
+        if source.generated and result.steps == 0:
+            logger.info(
+                "[Agent] generated skill rejected: no actions yielded for %s",
+                task.name,
+            )
+            task_complete = False
 
         if task_complete:
             self.strategy.on_task_completed(
@@ -180,6 +224,8 @@ class Agent:
                 else result.reason.value
             )
             failure_state["error_traceback"] = result.error
+            failure_state["executor_steps"] = result.steps
+            failure_state["executor_reason"] = result.reason.value
             call = self.strategy.on_task_failed(
                 task=task,
                 source=source,
@@ -188,6 +234,15 @@ class Agent:
                 curriculum=self.curriculum,
             )
             self._log_llm_call(call, call_type="reflection")
+
+        self._log_task_attempt(
+            task=task,
+            source=source,
+            skill_name=self.current_skill,
+            result=result,
+            final_state=final_state,
+            task_complete=task_complete,
+        )
 
         return result.reason == InterruptReason.EPISODE_DONE, final_state, False
 
@@ -264,6 +319,45 @@ class Agent:
             latency_ms=call.latency_ms,
             prompt_template_id=call.prompt_template_id,
             prompt_hash=call.prompt_hash,
+            prompt_text=getattr(call, "prompt_text", None),
+            generated_code=getattr(call, "code", None),
+            raw_response=getattr(call, "raw_response", None),
+        )
+
+    def _log_task_attempt(
+        self,
+        *,
+        task,
+        source,
+        skill_name: str | None,
+        result,
+        final_state: dict[str, Any],
+        task_complete: bool,
+    ) -> None:
+        info = final_state.get("info", {})
+        reason = (
+            "task_incomplete"
+            if not task_complete and result.reason == InterruptReason.COMPLETED
+            else result.reason.value
+        )
+        log_task_attempt(
+            self.run_logger,
+            episode_num=self._episode_num,
+            task_name=task.name,
+            task_description=task.description,
+            achievement_key=task.achievement_key,
+            skill_name=skill_name,
+            reused_skill=source.reused_name,
+            generated=source.generated,
+            executor_reason=result.reason.value,
+            failure_reason=None if task_complete else reason,
+            task_complete=task_complete,
+            steps=result.steps,
+            total_reward=result.total_reward,
+            achievements_gained=result.achievements_gained,
+            inventory=info.get("inventory", {}),
+            achievements=info.get("achievements", {}),
+            state_text=caption(final_state.get("obs"), info),
         )
 
     @staticmethod

@@ -32,6 +32,7 @@ class FixBugCall:
     reasoning_tokens: int | None
     latency_ms: int
     cost_usd: float
+    prompt_text: str | None = None
 
     @property
     def tokens_in(self) -> int:
@@ -136,6 +137,7 @@ class FixBug:
             reasoning_tokens=usage["reasoning_tokens"],
             latency_ms=latency_ms,
             cost_usd=cost,
+            prompt_text=user_prompt,
         )
 
     @staticmethod

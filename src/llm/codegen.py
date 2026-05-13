@@ -32,6 +32,7 @@ class CodeGenCall:
     reasoning_tokens: int | None
     latency_ms: int
     cost_usd: float
+    prompt_text: str | None = None
 
     @property
     def tokens_in(self) -> int:
@@ -81,6 +82,7 @@ class CodeGen:
         state_text: str,
         task: str,
         retrieved_skills: list[dict],
+        previous_failure: tuple[str, str] | None = None,
     ) -> CodeGenCall:
         """
         Generate a new skill function for the given task.
@@ -90,11 +92,15 @@ class CodeGen:
             task:             Task description from the curriculum.
             retrieved_skills: Top-K similar skills from the vector DB.
                               Each dict: {"name", "description", "code"}.
+            previous_failure: Optional (broken_code, failure_reason) from the
+                              previous codegen attempt for this same task.
 
         Returns:
             CodeGenCall with source code and API usage metadata.
         """
-        user_prompt = format_user_prompt(state_text, task, retrieved_skills)
+        user_prompt = format_user_prompt(
+            state_text, task, retrieved_skills, previous_failure=previous_failure
+        )
         return self._call_api(user_prompt, CODEGEN_TEMPLATE_ID)
 
     # ------------------------------------------------------------------
@@ -144,6 +150,7 @@ class CodeGen:
             reasoning_tokens=usage["reasoning_tokens"],
             latency_ms=latency_ms,
             cost_usd=cost,
+            prompt_text=user_prompt,
         )
 
     @staticmethod

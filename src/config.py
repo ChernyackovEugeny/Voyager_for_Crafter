@@ -1,7 +1,8 @@
 """Typed configuration loaded from environment variables.
 
 Each domain has its own pydantic-settings group with an env_prefix so that
-.env keys are namespaced (LLM_*, POSTGRES_*, CHROMA_*, EMB_*, EXEC_*, ENV_*).
+.env keys are namespaced (LLM_*, POSTGRES_*, CHROMA_*, EMB_*, EXEC_*,
+SURVIVAL_*, ENV_*).
 Single Settings aggregate is exposed via get_settings(), memoised.
 
 Bad value or missing required field → pydantic raises ValidationError at
@@ -122,7 +123,29 @@ class ExecutorConfig(_BaseGroup):
     max_steps_per_skill: int = 200
     max_iterations_per_episode: int = 50
     health_interrupt_threshold: int = 4
+    min_steps_before_health_interrupt: int = 5
     stagnation_window: int = 15
+    max_consecutive_task_failures: int = 3
+    min_reflection_steps: int = 3
+
+
+# ---------------------------------------------------------------------------
+# Survival task routing
+# ---------------------------------------------------------------------------
+
+class SurvivalConfig(_BaseGroup):
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8",
+        env_prefix="SURVIVAL_", extra="ignore",
+    )
+
+    enter_health: int = 7
+    enter_food: int = 6
+    enter_drink: int = 6
+    exit_health: int = 8
+    exit_food: int = 6
+    exit_drink: int = 6
+    max_consecutive_failures: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +231,7 @@ class Settings:
         self.chroma = ChromaConfig()
         self.embedding = EmbeddingConfig()
         self.executor = ExecutorConfig()
+        self.survival = SurvivalConfig()
         self.environment = EnvironmentConfig()
         self.logging = LoggingConfig()
         self.analytics = AnalyticsConfig()
@@ -221,6 +245,7 @@ class Settings:
             "chroma": self.chroma.model_dump(),
             "embedding": self.embedding.model_dump(),
             "executor": self.executor.model_dump(),
+            "survival": self.survival.model_dump(),
             "environment": self.environment.model_dump(),
             "logging": self.logging.model_dump(),
             "analytics": self.analytics.model_dump(),

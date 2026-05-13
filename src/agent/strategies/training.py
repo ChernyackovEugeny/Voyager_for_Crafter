@@ -14,7 +14,13 @@ class TrainingStrategy(AgentStrategy):
 
     name = "train"
 
-    _REFLECTABLE_REASONS = {"timeout", "health_low", "task_incomplete"}
+    _REFLECTABLE_REASONS = {
+        "timeout",
+        "health_low",
+        "danger_visible",
+        "stagnation",
+        "task_incomplete",
+    }
 
     def __init__(
         self,
@@ -27,6 +33,7 @@ class TrainingStrategy(AgentStrategy):
         max_reflections_per_skill: int = 3,
         max_fix_attempts: int = 3,
         skill_validator=None,
+        min_reflection_steps: int = 3,
     ):
         self._codegen = codegen
         self._bug_fixer = bug_fixer
@@ -36,7 +43,9 @@ class TrainingStrategy(AgentStrategy):
         self._max_reflections_per_skill = max_reflections_per_skill
         self._max_fix_attempts = max_fix_attempts
         self._skill_validator = skill_validator
+        self._min_reflection_steps = min_reflection_steps
         self._pending_llm_calls: list[tuple[str, object]] = []
+        self._last_codegen_failure: dict[str, tuple[str, str]] = {}
 
     def acquire_skill(
         self,
@@ -58,11 +67,13 @@ class TrainingStrategy(AgentStrategy):
 
         logger.info("[Agent] codegen: generating new skill for %s", task.name)
         state_text = caption(obs, info)
+        previous_failure = self._last_codegen_failure.get(task.name)
         try:
             call = self._codegen.get_code(
                 state_text=state_text,
                 task=task.description,
                 retrieved_skills=self._retrieved_skill_dicts(candidates),
+                previous_failure=previous_failure,
             )
         except Exception as exc:
             logger.warning("strategy: codegen failed for %s: %s", task.name, exc)
@@ -85,6 +96,7 @@ class TrainingStrategy(AgentStrategy):
 
     def on_task_completed(self, *, task, source: SkillSource, skill_manager) -> None:
         logger.info("[Agent] task success: %s", task.name)
+        self._last_codegen_failure.pop(task.name, None)
         if source.reused_name is not None:
             logger.info("[Agent] metric: record_success(%s)", source.reused_name)
             skill_manager.record_success(source.reused_name)
@@ -115,6 +127,10 @@ class TrainingStrategy(AgentStrategy):
 
         logger.info("[Agent] discard: generated skill was not successful")
         logger.info("[Agent] failed generated skill code:\n%s", source.code)
+        self._last_codegen_failure[task.name] = (
+            source.code,
+            str(state.get("failure_reason") or "unknown"),
+        )
         return None
 
     def retrieval_route(self, candidates) -> str:
@@ -270,6 +286,13 @@ class TrainingStrategy(AgentStrategy):
                 task.name,
             )
             return None
+        steps = int(state.get("executor_steps", 0) or 0)
+        if steps < self._min_reflection_steps and failure_reason != "task_incomplete":
+            logger.info(
+                "[Agent] reflection skipped: only %d step(s) before interrupt",
+                steps,
+            )
+            return None
 
         logger.info("[Agent] reflection: improving %s", skill.name)
         try:
@@ -323,7 +346,6 @@ class TrainingStrategy(AgentStrategy):
             return True
 
         required_inventory = {
-            "place_table": {"wood": 2},
             "place_furnace": {"stone": 4},
             "place_plant": {"sapling": 1},
         }

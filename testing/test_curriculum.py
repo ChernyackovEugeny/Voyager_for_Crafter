@@ -2,17 +2,19 @@ import sys
 import unittest
 from pathlib import Path
 
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import crafter
 
+from environment.ids import NAME_TO_ID
 from environment.achievements import ACHIEVEMENTS, TECH_TREE_ORDER
-from llm.curriculum import HardcodedCurriculum
+from llm.curriculum import HardcodedCurriculum, SurvivalSettings
 
 
-def _info(achievements: dict[str, int]) -> dict:
-    return {"achievements": achievements, "inventory": {}}
+def _info(achievements: dict[str, int], inventory=None) -> dict:
+    return {"achievements": achievements, "inventory": inventory or {}}
 
 
 class TechTreeIntegrityTests(unittest.TestCase):
@@ -117,6 +119,114 @@ class HardcodedCurriculumTests(unittest.TestCase):
 
         self.assertEqual(task.achievement_key, next_task.achievement_key)
         self.assertEqual(len(curriculum.failures), 1)
+
+    def test_survive_task_is_proposed_before_achievements_when_in_danger(self):
+        curriculum = HardcodedCurriculum()
+
+        task = curriculum.propose_task(_info({}, {"health": 6, "food": 9, "drink": 9}))
+
+        self.assertEqual(task.name, "survive")
+        self.assertIsNone(task.achievement_key)
+        self.assertEqual(task.skip_key, "survive")
+
+    def test_survive_task_is_proposed_when_hostile_visible(self):
+        curriculum = HardcodedCurriculum()
+        semantic = np.zeros((64, 64), dtype=int)
+        semantic[11, 10] = NAME_TO_ID["zombie"]
+        info = _info(
+            {},
+            {"health": 9, "food": 9, "drink": 9},
+        )
+        info.update({"semantic": semantic, "player_pos": (10, 10), "view_size": (9, 9)})
+
+        task = curriculum.propose_task(info)
+
+        self.assertEqual(task.name, "survive")
+
+    def test_hostile_visible_overrides_survive_skip(self):
+        curriculum = HardcodedCurriculum()
+        semantic = np.zeros((64, 64), dtype=int)
+        semantic[11, 10] = NAME_TO_ID["skeleton"]
+        info = _info({}, {"health": 9, "food": 9, "drink": 9})
+        info.update({"semantic": semantic, "player_pos": (10, 10), "view_size": (9, 9)})
+
+        task = curriculum.propose_task(info, skip={"survive"})
+
+        self.assertEqual(task.name, "survive")
+
+    def test_survive_not_complete_while_hostile_visible(self):
+        curriculum = HardcodedCurriculum()
+        semantic = np.zeros((64, 64), dtype=int)
+        semantic[11, 10] = NAME_TO_ID["zombie"]
+        info = _info({}, {"health": 9, "food": 9, "drink": 9})
+        info.update({"semantic": semantic, "player_pos": (10, 10), "view_size": (9, 9)})
+        task = curriculum.propose_task(info)
+
+        self.assertFalse(curriculum.is_task_complete(task, info))
+
+    def test_survive_task_respects_skip(self):
+        curriculum = HardcodedCurriculum()
+
+        task = curriculum.propose_task(
+            _info({}, {"health": 6, "food": 9, "drink": 9}),
+            skip={"survive"},
+        )
+
+        self.assertEqual(task.achievement_key, "collect_wood")
+
+    def test_survive_complete_requires_exit_thresholds(self):
+        curriculum = HardcodedCurriculum(
+            survival=SurvivalSettings(
+                enter_health=6,
+                enter_food=3,
+                enter_drink=3,
+                exit_health=8,
+                exit_food=6,
+                exit_drink=6,
+            )
+        )
+        task = curriculum.propose_task(
+            _info({}, {"health": 6, "food": 9, "drink": 9})
+        )
+
+        self.assertFalse(
+            curriculum.is_task_complete(
+                task,
+                _info({}, {"health": 7, "food": 6, "drink": 6}),
+            )
+        )
+        self.assertTrue(
+            curriculum.is_task_complete(
+                task,
+                _info({}, {"health": 8, "food": 6, "drink": 6}),
+            )
+        )
+
+    def test_survival_hysteresis_keeps_survive_until_recovered(self):
+        curriculum = HardcodedCurriculum(
+            survival=SurvivalSettings(
+                enter_health=6,
+                enter_food=3,
+                enter_drink=3,
+                exit_health=8,
+                exit_food=6,
+                exit_drink=6,
+            )
+        )
+
+        danger_task = curriculum.propose_task(
+            _info({}, {"health": 5, "food": 9, "drink": 9})
+        )
+        middle_task = curriculum.propose_task(
+            _info({}, {"health": 7, "food": 9, "drink": 9})
+        )
+        recovered_task = curriculum.propose_task(
+            _info({}, {"health": 8, "food": 6, "drink": 6})
+        )
+
+        self.assertEqual(danger_task.name, "survive")
+        self.assertEqual(middle_task.achievement_key, "collect_wood")
+        self.assertEqual(recovered_task.achievement_key, "collect_wood")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ Three tables:
   - sessions     one row per run() invocation
   - episodes     one row per episode within a session
   - llm_calls    one row per LLM API call (codegen/fix_bug/curriculum/reflection)
+  - task_attempts one row per executed task/skill attempt
 
 Usage:
     with RunLogger(config_snapshot={...}) as run_log:
@@ -89,6 +90,9 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     cost_usd            DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     latency_ms          INTEGER NOT NULL DEFAULT 0,
     error               TEXT,
+    prompt_text         TEXT,
+    generated_code      TEXT,
+    raw_response        TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -96,6 +100,33 @@ CREATE INDEX IF NOT EXISTS idx_llm_calls_session
     ON llm_calls (session_id, call_type);
 CREATE INDEX IF NOT EXISTS idx_llm_calls_hash
     ON llm_calls (prompt_hash);
+
+CREATE TABLE IF NOT EXISTS task_attempts (
+    attempt_id          TEXT PRIMARY KEY,
+    session_id          TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    episode_num         INTEGER,
+    task_name           TEXT NOT NULL,
+    task_description    TEXT,
+    achievement_key     TEXT,
+    skill_name          TEXT,
+    reused_skill        TEXT,
+    generated           BOOLEAN NOT NULL DEFAULT FALSE,
+    executor_reason     TEXT,
+    failure_reason      TEXT,
+    task_complete       BOOLEAN NOT NULL DEFAULT FALSE,
+    steps               INTEGER NOT NULL DEFAULT 0,
+    total_reward        DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    achievements_gained JSONB NOT NULL DEFAULT '[]'::jsonb,
+    inventory           JSONB NOT NULL DEFAULT '{}'::jsonb,
+    achievements        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    state_text          TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_attempts_session
+    ON task_attempts (session_id, episode_num);
+CREATE INDEX IF NOT EXISTS idx_task_attempts_task
+    ON task_attempts (task_name, failure_reason);
 """
 
 _MIGRATIONS = """
@@ -104,6 +135,9 @@ ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS episode_num INTEGER;
 ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS prompt_cache_hit_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS prompt_cache_miss_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS reasoning_tokens INTEGER;
+ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS prompt_text TEXT;
+ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS generated_code TEXT;
+ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS raw_response TEXT;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'running';
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS run_metadata JSONB;
 """
@@ -238,6 +272,9 @@ class RunLogger:
         cost_usd: float = 0.0,
         latency_ms: int = 0,
         error: str | None = None,
+        prompt_text: str | None = None,
+        generated_code: str | None = None,
+        raw_response: str | None = None,
     ) -> None:
         if self._disabled:
             return
@@ -250,8 +287,9 @@ class RunLogger:
                          model, prompt_template_id, prompt_hash,
                          tokens_in, tokens_out,
                          prompt_cache_hit_tokens, prompt_cache_miss_tokens,
-                         reasoning_tokens, cost_usd, latency_ms, error)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         reasoning_tokens, cost_usd, latency_ms, error,
+                         prompt_text, generated_code, raw_response)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         _uuid(), self.session_id, episode_id, episode_num, call_type,
@@ -259,10 +297,60 @@ class RunLogger:
                         tokens_in, tokens_out,
                         prompt_cache_hit_tokens, prompt_cache_miss_tokens,
                         reasoning_tokens, cost_usd, latency_ms, error,
+                        prompt_text, generated_code, raw_response,
                     ),
                 )
         except Exception as exc:
             logger.debug("RunLogger.record_llm_call failed: %s", exc)
+
+    def record_task_attempt(
+        self,
+        *,
+        episode_num: int,
+        task_name: str,
+        task_description: str | None = None,
+        achievement_key: str | None = None,
+        skill_name: str | None = None,
+        reused_skill: str | None = None,
+        generated: bool = False,
+        executor_reason: str | None = None,
+        failure_reason: str | None = None,
+        task_complete: bool = False,
+        steps: int = 0,
+        total_reward: float = 0.0,
+        achievements_gained: list[str] | None = None,
+        inventory: dict | None = None,
+        achievements: dict | None = None,
+        state_text: str | None = None,
+    ) -> None:
+        if self._disabled:
+            return
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO task_attempts
+                        (attempt_id, session_id, episode_num, task_name,
+                         task_description, achievement_key, skill_name,
+                         reused_skill, generated, executor_reason,
+                         failure_reason, task_complete, steps, total_reward,
+                         achievements_gained, inventory, achievements, state_text)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        _uuid(), self.session_id, episode_num, task_name,
+                        task_description, achievement_key, skill_name,
+                        reused_skill, bool(generated), executor_reason,
+                        failure_reason, bool(task_complete), int(steps),
+                        float(total_reward),
+                        json.dumps(achievements_gained or []),
+                        json.dumps(inventory or {}),
+                        json.dumps(achievements or {}),
+                        state_text,
+                    ),
+                )
+        except Exception as exc:
+            logger.debug("RunLogger.record_task_attempt failed: %s", exc)
 
     def finalize(self, final_achievements: dict) -> None:
         """Stash final achievements; written to DB by __exit__."""

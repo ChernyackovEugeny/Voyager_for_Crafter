@@ -7,6 +7,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent.executor import Executor, InterruptReason
+from environment.ids import NAME_TO_ID
 
 
 class FakeEnv:
@@ -38,14 +39,33 @@ class FakeViewer:
         self.frames.append(frame)
 
 
-def state(health=9, achievements=None, obs="obs"):
+def state(
+    health=9,
+    achievements=None,
+    obs="obs",
+    player_pos=(0, 0),
+    inventory=None,
+):
+    inv = {"health": health}
+    if inventory:
+        inv.update(inventory)
     return {
         "obs": obs,
         "info": {
-            "inventory": {"health": health},
+            "inventory": inv,
             "achievements": achievements or {},
+            "player_pos": player_pos,
         },
     }
+
+
+def state_with_visible(name, player_pos=(10, 10)):
+    current = state(player_pos=player_pos)
+    semantic = np.zeros((64, 64), dtype=int)
+    semantic[player_pos[0] + 1, player_pos[1]] = NAME_TO_ID[name]
+    current["info"]["semantic"] = semantic
+    current["info"]["view_size"] = (9, 9)
+    return current
 
 
 class TestExecutor(unittest.TestCase):
@@ -203,6 +223,213 @@ class TestExecutor(unittest.TestCase):
 
         result = ex.run(skill, NoRenderEnv(), state())
         self.assertEqual(result.reason, InterruptReason.TIMEOUT)
+
+    def test_stagnation_interrupts_noop_loop(self):
+        ex = Executor(
+            max_steps_per_skill=50,
+            health_threshold=4,
+            stagnation_window=3,
+        )
+        env = FakeEnv([("obs", 0.0, False, False, state()["info"])])
+
+        def skill(current):
+            while True:
+                current = yield 0
+
+        result = ex.run(skill, env, state())
+        self.assertEqual(result.reason, InterruptReason.STAGNATION)
+        self.assertEqual(result.steps, 3)
+
+    def test_stagnation_disabled_with_zero_window(self):
+        ex = Executor(
+            max_steps_per_skill=3,
+            health_threshold=4,
+            stagnation_window=0,
+        )
+        env = FakeEnv([("obs", 0.0, False, False, state()["info"])])
+
+        def skill(current):
+            while True:
+                current = yield 0
+
+        result = ex.run(skill, env, state())
+        self.assertEqual(result.reason, InterruptReason.TIMEOUT)
+
+    def test_movement_prevents_stagnation(self):
+        ex = Executor(
+            max_steps_per_skill=3,
+            health_threshold=4,
+            stagnation_window=2,
+        )
+        env = FakeEnv([
+            ("obs", 0.0, False, False, state(player_pos=(1, 0))["info"]),
+            ("obs", 0.0, False, False, state(player_pos=(2, 0))["info"]),
+            ("obs", 0.0, False, False, state(player_pos=(3, 0))["info"]),
+        ])
+
+        def skill(current):
+            while True:
+                current = yield 0
+
+        result = ex.run(skill, env, state(player_pos=(0, 0)))
+        self.assertEqual(result.reason, InterruptReason.TIMEOUT)
+
+    def test_item_inventory_growth_prevents_stagnation(self):
+        ex = Executor(
+            max_steps_per_skill=3,
+            health_threshold=4,
+            stagnation_window=2,
+        )
+        env = FakeEnv([
+            ("obs", 0.0, False, False, state(inventory={"wood": 1})["info"]),
+            ("obs", 0.0, False, False, state(inventory={"wood": 2})["info"]),
+            ("obs", 0.0, False, False, state(inventory={"wood": 3})["info"]),
+        ])
+
+        def skill(current):
+            while True:
+                current = yield 0
+
+        result = ex.run(skill, env, state(inventory={"wood": 0}))
+        self.assertEqual(result.reason, InterruptReason.TIMEOUT)
+
+    def test_achievement_progress_prevents_stagnation(self):
+        ex = Executor(
+            max_steps_per_skill=2,
+            health_threshold=4,
+            stagnation_window=1,
+        )
+        env = FakeEnv([
+            (
+                "obs",
+                0.0,
+                False,
+                False,
+                state(achievements={"collect_wood": 1})["info"],
+            ),
+            (
+                "obs",
+                0.0,
+                False,
+                False,
+                state(achievements={"collect_wood": 1, "place_table": 1})["info"],
+            ),
+        ])
+
+        def skill(current):
+            while True:
+                current = yield 0
+
+        result = ex.run(skill, env, state(achievements={"collect_wood": 0}))
+        self.assertEqual(result.reason, InterruptReason.TIMEOUT)
+
+    def test_stat_decay_does_not_prevent_stagnation(self):
+        ex = Executor(
+            max_steps_per_skill=50,
+            health_threshold=4,
+            stagnation_window=2,
+        )
+        env = FakeEnv([
+            (
+                "obs",
+                0.0,
+                False,
+                False,
+                state(inventory={"food": 8, "drink": 8})["info"],
+            ),
+            (
+                "obs",
+                0.0,
+                False,
+                False,
+                state(inventory={"food": 7, "drink": 7})["info"],
+            ),
+        ])
+
+        def skill(current):
+            while True:
+                current = yield 0
+
+        result = ex.run(skill, env, state(inventory={"food": 9, "drink": 9}))
+        self.assertEqual(result.reason, InterruptReason.STAGNATION)
+
+    def test_survival_stats_can_count_as_progress_for_survive(self):
+        ex = Executor(
+            max_steps_per_skill=3,
+            health_threshold=4,
+            stagnation_window=1,
+        )
+        env = FakeEnv([
+            ("obs", 0.0, False, False, state(inventory={"energy": 2})["info"]),
+            ("obs", 0.0, False, False, state(inventory={"energy": 3})["info"]),
+            ("obs", 0.0, False, False, state(inventory={"energy": 4})["info"]),
+        ])
+
+        def skill(current):
+            while True:
+                current = yield 0
+
+        result = ex.run(skill, env, state(inventory={"energy": 1}), survival_progress_enabled=True)
+        self.assertEqual(result.reason, InterruptReason.TIMEOUT)
+
+    def test_danger_interrupts_when_enabled(self):
+        ex = Executor(max_steps_per_skill=50, health_threshold=4)
+        current = state_with_visible("zombie")
+        env = FakeEnv([("obs", 0.0, False, False, current["info"])])
+
+        def skill(current):
+            while True:
+                current = yield 0
+
+        result = ex.run(skill, env, state(), danger_interrupt_enabled=True)
+        self.assertEqual(result.reason, InterruptReason.DANGER_VISIBLE)
+
+    def test_health_warmup_lets_skill_act_before_interrupt(self):
+        ex = Executor(
+            max_steps_per_skill=50,
+            health_threshold=4,
+            min_steps_before_health_interrupt=3,
+        )
+        env = FakeEnv([("obs", 0.0, False, False, state(health=2)["info"])])
+
+        def skill(current):
+            while True:
+                current = yield 0
+
+        result = ex.run(skill, env, state(health=2))
+        self.assertEqual(result.reason, InterruptReason.HEALTH_LOW)
+        self.assertEqual(result.steps, 3)
+
+    def test_health_warmup_zero_keeps_step_one_interrupt(self):
+        ex = Executor(
+            max_steps_per_skill=50,
+            health_threshold=4,
+            min_steps_before_health_interrupt=0,
+        )
+        env = FakeEnv([("obs", 0.0, False, False, state(health=2)["info"])])
+
+        def skill(current):
+            while True:
+                current = yield 0
+
+        result = ex.run(skill, env, state(health=2))
+        self.assertEqual(result.reason, InterruptReason.HEALTH_LOW)
+        self.assertEqual(result.steps, 1)
+
+    def test_health_low_has_priority_over_stagnation(self):
+        ex = Executor(
+            max_steps_per_skill=50,
+            health_threshold=4,
+            stagnation_window=1,
+        )
+        env = FakeEnv([("obs", 0.0, False, False, state(health=4)["info"])])
+
+        def skill(current):
+            while True:
+                current = yield 0
+
+        result = ex.run(skill, env, state())
+        self.assertEqual(result.reason, InterruptReason.HEALTH_LOW)
 
 
 if __name__ == "__main__":

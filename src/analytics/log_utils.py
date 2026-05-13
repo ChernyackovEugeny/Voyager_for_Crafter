@@ -64,6 +64,9 @@ def log_llm_call_ok(
     prompt_cache_hit_tokens: int = 0,
     prompt_cache_miss_tokens: int = 0,
     reasoning_tokens: int | None = None,
+    prompt_text: str | None = None,
+    generated_code: str | None = None,
+    raw_response: str | None = None,
 ) -> None:
     """Successful LLM call."""
     if run_log is None:
@@ -83,6 +86,9 @@ def log_llm_call_ok(
         cost_usd=cost_usd,
         latency_ms=latency_ms,
         error=None,
+        prompt_text=prompt_text,
+        generated_code=generated_code,
+        raw_response=raw_response,
     )
 
 
@@ -113,6 +119,56 @@ def log_llm_call_fail(
         cost_usd=0.0,
         latency_ms=latency_ms,
         error=str(error),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task attempts
+# ---------------------------------------------------------------------------
+
+def log_task_attempt(
+    run_log: RunLogger | None,
+    *,
+    episode_num: int,
+    task_name: str,
+    task_description: str | None = None,
+    achievement_key: str | None = None,
+    skill_name: str | None = None,
+    reused_skill: str | None = None,
+    generated: bool = False,
+    executor_reason: str | None = None,
+    failure_reason: str | None = None,
+    task_complete: bool = False,
+    steps: int = 0,
+    total_reward: float = 0.0,
+    achievements_gained: list[str] | None = None,
+    inventory: dict | None = None,
+    achievements: dict | None = None,
+    state_text: str | None = None,
+) -> None:
+    """Record one executed task/skill attempt."""
+    if run_log is None:
+        return
+    record = getattr(run_log, "record_task_attempt", None)
+    if record is None:
+        return
+    record(
+        episode_num=episode_num,
+        task_name=task_name,
+        task_description=task_description,
+        achievement_key=achievement_key,
+        skill_name=skill_name,
+        reused_skill=reused_skill,
+        generated=generated,
+        executor_reason=executor_reason,
+        failure_reason=failure_reason,
+        task_complete=task_complete,
+        steps=steps,
+        total_reward=total_reward,
+        achievements_gained=achievements_gained,
+        inventory=inventory,
+        achievements=achievements,
+        state_text=state_text,
     )
 
 

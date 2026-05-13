@@ -115,8 +115,16 @@ def _memory_namespace(memory: Any) -> dict[str, Any]:
 def load_skill(
     source: str,
     runtime: SkillRuntime | None = None,
+    extra_skills: list[tuple[str, str]] | None = None,
 ) -> tuple[str, Callable]:
-    """Compile skill source into a callable and return (function_name, func)."""
+    """Compile skill source into a callable and return (function_name, func).
+
+    extra_skills: optional list of (skill_name, skill_code) pairs to compile
+    into the namespace BEFORE the main skill, so the main skill can call them
+    by name. Individual extra_skills that fail safety/parse checks are silently
+    skipped — they remain available in the prompt as inspiration but won't
+    crash the main load.
+    """
     try:
         tree = ast.parse(source)
     except SyntaxError as exc:
@@ -134,6 +142,25 @@ def load_skill(
 
     func_name = func_def.name
     namespace = _build_namespace(runtime)
+
+    if extra_skills:
+        for extra_name, extra_code in extra_skills:
+            if extra_name == func_name:
+                continue
+            try:
+                extra_tree = ast.parse(extra_code)
+                _assert_safe(extra_tree)
+                _assert_single_top_level_function(extra_tree)
+                exec(
+                    compile(
+                        extra_tree,
+                        filename=f"<extra_skill:{extra_name}>",
+                        mode="exec",
+                    ),
+                    namespace,
+                )
+            except (SkillLoadError, SyntaxError, Exception):
+                continue
 
     try:
         exec(compile(tree, filename=f"<skill:{func_name}>", mode="exec"), namespace)
