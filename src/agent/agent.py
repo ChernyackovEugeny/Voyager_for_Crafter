@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from agent.executor import Executor, InterruptReason
 from agent.memory import SpatialMemory
+from analytics.log_utils import log_episode, log_llm_call_ok
 from skills.runner import SkillLoadError, SkillRuntime, load_skill
 
 logger = logging.getLogger(__name__)
@@ -35,13 +37,19 @@ class Agent:
         self.run_logger = run_logger
         self.current_task = None
         self.current_skill = None
+        self._last_result = None
+        self._episode_num = 1
 
-    def run(self) -> dict[str, Any]:
+    def run(self, *, episode_num: int = 1) -> dict[str, Any]:
         """Run one episode through task proposal, skill selection, and execution."""
         logger.info("[Agent] episode started")
+        self._episode_num = episode_num
+        started_at = datetime.now(timezone.utc)
         self.memory.reset()
         state, done = self._initial_state()
         iterations = 0
+        episode_steps = 0
+        episode_reward = 0.0
         skipped_task_keys: set[str] = set()
 
         while not done and iterations < self.max_iterations_per_episode:
@@ -56,6 +64,9 @@ class Agent:
             self.current_task = task
             logger.info("[Agent] task: %s | %s", task.name, task.description)
             done, state, skipped = self.step(state, task)
+            if self._last_result is not None:
+                episode_steps += self._last_result.steps
+                episode_reward += self._last_result.total_reward
             if skipped and task.achievement_key is not None:
                 skipped_task_keys.add(task.achievement_key)
             iterations += 1
@@ -69,9 +80,21 @@ class Agent:
             )
 
         achievements = self._unlocked_achievements(state["info"])
+        ended_at = datetime.now(timezone.utc)
+        episode_id = log_episode(
+            self.run_logger,
+            episode_num=episode_num,
+            achievements=state["info"].get("achievements", {}),
+            steps=episode_steps,
+            total_reward=episode_reward,
+            started_at=started_at,
+            ended_at=ended_at,
+        )
         logger.info(
-            "[Agent] summary: iterations=%d | achievements=%s",
+            "[Agent] summary: iterations=%d | steps=%d | reward=%.3f | achievements=%s",
             iterations,
+            episode_steps,
+            episode_reward,
             ", ".join(achievements) if achievements else "none",
         )
         return {
@@ -80,6 +103,9 @@ class Agent:
             "episode_done": done,
             "all_tasks_done": self.curriculum.propose_task(state["info"]) is None,
             "skipped_tasks": sorted(skipped_task_keys),
+            "steps": episode_steps,
+            "total_reward": episode_reward,
+            "episode_id": episode_id,
         }
 
     def step(
@@ -89,6 +115,7 @@ class Agent:
     ) -> tuple[bool, dict[str, Any], bool]:
         """Run one task attempt and return (episode_done, final_state, skipped)."""
         candidates = self.skill_manager.retrieve(task.description)
+        self._last_result = None
         self._log_retrieval(candidates)
         source = self.strategy.acquire_skill(
             task=task,
@@ -103,6 +130,7 @@ class Agent:
                 curriculum=self.curriculum,
             )
             return False, state, True
+        self._log_source_llm_call(source)
 
         try:
             function_name, skill_func = load_skill(
@@ -125,6 +153,7 @@ class Agent:
             logger.info("[Agent] codegen: generated function %s", function_name)
         logger.info("[Agent] execute: %s", self.current_skill)
         result = self.executor.run(skill_func, self.env, state)
+        self._last_result = result
         self._log_execution_result(result)
         final_state = result.final_state
         task_complete = self.curriculum.is_task_complete(
@@ -183,6 +212,26 @@ class Agent:
         if result.error:
             first_line = result.error.splitlines()[0] if result.error else ""
             logger.info("[Executor] error: %s", first_line)
+
+    def _log_source_llm_call(self, source) -> None:
+        call = getattr(source, "llm_call", None)
+        if call is None:
+            return
+        log_llm_call_ok(
+            self.run_logger,
+            call_type="codegen",
+            episode_num=self._episode_num,
+            model=call.model,
+            tokens_in=call.tokens_in,
+            tokens_out=call.tokens_out,
+            prompt_cache_hit_tokens=call.prompt_cache_hit_tokens,
+            prompt_cache_miss_tokens=call.prompt_cache_miss_tokens,
+            reasoning_tokens=call.reasoning_tokens,
+            cost_usd=call.cost_usd,
+            latency_ms=call.latency_ms,
+            prompt_template_id=call.prompt_template_id,
+            prompt_hash=call.prompt_hash,
+        )
 
     @staticmethod
     def _unlocked_achievements(info: dict[str, Any]) -> list[str]:

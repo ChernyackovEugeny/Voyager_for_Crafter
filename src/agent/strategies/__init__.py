@@ -10,6 +10,7 @@ class SkillSource:
     code: str
     reused_name: str | None = None
     generated: bool = False
+    llm_call: object | None = None
 
 
 class AgentStrategy:
@@ -17,7 +18,14 @@ class AgentStrategy:
 
     name = "base"
 
-    def acquire_skill(self, *, task, obs, info: dict, candidates):
+    def acquire_skill(
+        self,
+        *,
+        task,
+        obs,
+        info: dict,
+        candidates,
+    ):
         """Return SkillSource for this task, or None when no skill is available."""
         raise NotImplementedError
 

@@ -9,6 +9,7 @@ from agent.agent import Agent
 from agent.executor import ExecutionResult, InterruptReason
 from agent.memory import SpatialMemory
 from agent.strategies import SkillSource
+from llm.codegen import CodeGenCall
 from llm.curriculum import Task
 from skills.results import SkillCandidate
 from storage.schemas import SkillRecord
@@ -57,6 +58,19 @@ class FakeSkillManager:
     def retrieve(self, task_text):
         self.retrieve_calls.append(task_text)
         return self.candidates
+
+
+class FakeRunLogger:
+    def __init__(self):
+        self.episodes = []
+        self.llm_calls = []
+
+    def record_episode(self, **kwargs):
+        self.episodes.append(kwargs)
+        return "episode-id"
+
+    def record_llm_call(self, **kwargs):
+        self.llm_calls.append(kwargs)
 
 
 class FakeStrategy:
@@ -132,6 +146,23 @@ def _skill_code():
     return "def collect_wood(state):\n    state = yield 0\n"
 
 
+def _llm_call():
+    return CodeGenCall(
+        code=_skill_code(),
+        raw_response=f"```python\n{_skill_code()}\n```",
+        model="deepseek-v4-flash",
+        prompt_template_id="codegen.v1",
+        prompt_hash="abc123",
+        prompt_tokens=100,
+        prompt_cache_hit_tokens=40,
+        prompt_cache_miss_tokens=60,
+        completion_tokens=20,
+        reasoning_tokens=None,
+        latency_ms=123,
+        cost_usd=0.001,
+    )
+
+
 def _candidate(name="existing_wood", similarity=0.9):
     skill = SkillRecord(
         name=name,
@@ -148,6 +179,7 @@ def _agent(
     strategy=None,
     executor=None,
     max_iterations=5,
+    run_logger=None,
 ):
     return Agent(
         env=FakeEnv(),
@@ -157,6 +189,7 @@ def _agent(
         executor=executor or FakeExecutor(complete=True),
         memory=SpatialMemory(),
         max_iterations_per_episode=max_iterations,
+        run_logger=run_logger,
     )
 
 
@@ -241,6 +274,24 @@ class AgentTests(unittest.TestCase):
         agent.run()
 
         self.assertEqual(manager.retrieve_calls, ["Chop a tree to obtain wood."])
+
+    def test_agent_logs_llm_call_from_generated_skill_source(self):
+        run_logger = FakeRunLogger()
+        strategy = FakeStrategy([
+            SkillSource(code=_skill_code(), generated=True, llm_call=_llm_call())
+        ])
+        agent = _agent(
+            strategy=strategy,
+            executor=FakeExecutor(complete=True),
+            run_logger=run_logger,
+        )
+
+        summary = agent.run(episode_num=7)
+
+        self.assertEqual(summary["episode_id"], "episode-id")
+        self.assertEqual(run_logger.llm_calls[0]["call_type"], "codegen")
+        self.assertEqual(run_logger.llm_calls[0]["episode_num"], 7)
+        self.assertEqual(run_logger.llm_calls[0]["model"], "deepseek-v4-flash")
 
     def test_max_iterations_stops_repeated_failures(self):
         curriculum = FakeCurriculum([_task()])

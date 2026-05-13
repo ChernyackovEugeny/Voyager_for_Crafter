@@ -13,12 +13,18 @@ class TrainingStrategy(AgentStrategy):
 
     name = "train"
 
-    def __init__(self, *, codegen, reuse_threshold: float, run_logger=None) -> None:
+    def __init__(self, *, codegen, reuse_threshold: float) -> None:
         self._codegen = codegen
         self._reuse_threshold = reuse_threshold
-        self._run_logger = run_logger
 
-    def acquire_skill(self, *, task, obs, info: dict, candidates):
+    def acquire_skill(
+        self,
+        *,
+        task,
+        obs,
+        info: dict,
+        candidates,
+    ):
         selected = self._select_reusable_skill(candidates)
         if selected is not None:
             logger.info("[Agent] reuse: %s", selected.skill.name)
@@ -30,7 +36,7 @@ class TrainingStrategy(AgentStrategy):
 
         logger.info("[Agent] codegen: generating new skill for %s", task.name)
         try:
-            code = self._codegen.get_code(
+            call = self._codegen.get_code(
                 state_text=caption(obs, info),
                 task=task.description,
                 retrieved_skills=self._retrieved_skill_dicts(candidates),
@@ -38,7 +44,7 @@ class TrainingStrategy(AgentStrategy):
         except Exception as exc:
             logger.warning("strategy: codegen failed for %s: %s", task.name, exc)
             return None
-        return SkillSource(code=code, generated=True)
+        return SkillSource(code=call.code, generated=True, llm_call=call)
 
     def on_skill_unavailable(self, *, task, state: dict, curriculum) -> None:
         logger.info("[Agent] task failed: %s", task.name)

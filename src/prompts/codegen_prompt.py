@@ -8,6 +8,9 @@ format_user_prompt  — dynamic user message for get_code.
 format_fix_prompt   — dynamic user message for fix_bug.
 """
 
+CODEGEN_TEMPLATE_ID = "codegen.v1"
+FIX_BUG_TEMPLATE_ID = "fix_bug.v1"
+
 # ---------------------------------------------------------------------------
 # System prompt (static — do not add any dynamic content here)
 # ---------------------------------------------------------------------------

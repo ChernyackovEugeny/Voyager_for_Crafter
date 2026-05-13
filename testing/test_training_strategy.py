@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agent.strategies.training import TrainingStrategy
+from llm.codegen import CodeGenCall
 from llm.curriculum import Task
 from skills.results import SaveResult, SkillCandidate
 from storage.schemas import SkillRecord
@@ -25,7 +26,20 @@ class FakeCodeGen:
         })
         if self.fail:
             raise RuntimeError("llm down")
-        return self.code
+        return CodeGenCall(
+            code=self.code,
+            raw_response=f"```python\n{self.code}\n```",
+            model="deepseek-v4-flash",
+            prompt_template_id="codegen.v1",
+            prompt_hash="abc123",
+            prompt_tokens=100,
+            prompt_cache_hit_tokens=40,
+            prompt_cache_miss_tokens=60,
+            completion_tokens=20,
+            reasoning_tokens=None,
+            latency_ms=123,
+            cost_usd=0.001,
+        )
 
 
 class FakeSkillManager:
@@ -152,6 +166,21 @@ class TrainingStrategyTests(unittest.TestCase):
         )
 
         self.assertIsNone(source)
+
+    def test_codegen_call_is_attached_to_generated_source(self):
+        strategy = TrainingStrategy(codegen=FakeCodeGen(), reuse_threshold=0.85)
+
+        source = strategy.acquire_skill(
+            task=_task(),
+            obs=None,
+            info=_info(),
+            candidates=[],
+        )
+
+        self.assertIsNotNone(source)
+        self.assertIsNotNone(source.llm_call)
+        self.assertEqual(source.llm_call.model, "deepseek-v4-flash")
+        self.assertEqual(source.llm_call.prompt_cache_hit_tokens, 40)
 
     def test_generated_success_saves_and_records_success(self):
         manager = FakeSkillManager()

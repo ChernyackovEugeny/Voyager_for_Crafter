@@ -158,6 +158,20 @@ class LoggingConfig(_BaseGroup):
 
 
 # ---------------------------------------------------------------------------
+# Analytics / training loop
+# ---------------------------------------------------------------------------
+
+class AnalyticsConfig(_BaseGroup):
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8",
+        env_prefix="ANALYTICS_", extra="ignore",
+    )
+
+    episodes: int = 1
+    early_stop_patience: int = 10
+
+
+# ---------------------------------------------------------------------------
 # Aggregate
 # ---------------------------------------------------------------------------
 
@@ -172,6 +186,7 @@ class Settings:
         self.executor = ExecutorConfig()
         self.environment = EnvironmentConfig()
         self.logging = LoggingConfig()
+        self.analytics = AnalyticsConfig()
 
     def snapshot(self) -> dict:
         """Serializable config dump for analytics (config_snapshot column)."""
@@ -183,6 +198,7 @@ class Settings:
             "executor": self.executor.model_dump(),
             "environment": self.environment.model_dump(),
             "logging": self.logging.model_dump(),
+            "analytics": self.analytics.model_dump(),
         }
 
 

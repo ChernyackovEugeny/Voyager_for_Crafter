@@ -51,6 +51,25 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Chroma collection name for the skill library.",
     )
+    parser.add_argument(
+        "--episodes",
+        type=int,
+        default=None,
+        help="Number of episodes to run in this session.",
+    )
+    parser.add_argument(
+        "--early-stop-window",
+        type=int,
+        default=None,
+        dest="early_stop_patience",
+        help="Deprecated alias for --early-stop-patience.",
+    )
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=None,
+        help="Stop after N consecutive episodes without new achievements.",
+    )
     return parser.parse_args(argv)
 
 
@@ -59,6 +78,12 @@ def main(argv: list[str] | None = None) -> None:
     settings = get_settings()
     if args.skill_library:
         settings.chroma.skills_collection = args.skill_library
+    episodes = args.episodes or settings.analytics.episodes
+    early_stop_patience = (
+        args.early_stop_patience
+        if args.early_stop_patience is not None
+        else settings.analytics.early_stop_patience
+    )
     configure_logging(settings.logging.level)
 
     log = logging.getLogger("main")
@@ -81,7 +106,12 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     with RunLogger(config_snapshot=settings.snapshot()) as run_log:
-        log.info("running one episode (session=%s)", run_log.session_id)
+        log.info(
+            "running episodes: count=%d early_stop_patience=%d session=%s",
+            episodes,
+            early_stop_patience,
+            run_log.session_id,
+        )
         if args.render:
             log.info(
                 "render enabled: size=%d step_delay=%.3f",
@@ -92,7 +122,6 @@ def main(argv: list[str] | None = None) -> None:
             strategy = TrainingStrategy(
                 codegen=CodeGen(),
                 reuse_threshold=settings.embedding.similarity_reuse_threshold,
-                run_logger=run_log,
             )
         else:
             strategy = InferenceStrategy(
@@ -110,7 +139,39 @@ def main(argv: list[str] | None = None) -> None:
             ),
             run_logger=run_log,
         )
-        summary = agent.run()
+        summary = None
+        best_achievement_count = -1
+        episodes_without_progress = 0
+        for episode_num in range(1, episodes + 1):
+            log.info("episode %d/%d started", episode_num, episodes)
+            summary = agent.run(episode_num=episode_num)
+            achievements = summary["final_state"]["info"].get("achievements", {})
+            achievement_count = sum(1 for value in achievements.values() if value)
+            if achievement_count > best_achievement_count:
+                best_achievement_count = achievement_count
+                episodes_without_progress = 0
+            else:
+                episodes_without_progress += 1
+            log.info(
+                "episode %d/%d finished: achievements=%d steps=%d reward=%.3f",
+                episode_num,
+                episodes,
+                achievement_count,
+                summary["steps"],
+                summary["total_reward"],
+            )
+            if (
+                episodes_without_progress >= early_stop_patience
+                and episode_num < episodes
+            ):
+                log.info(
+                    "early stop: no new achievements for %d episodes",
+                    early_stop_patience,
+                )
+                break
+
+        if summary is None:
+            raise RuntimeError("no episodes were run")
         log_session_finalize(
             run_log,
             final_achievements=summary["final_state"]["info"].get(

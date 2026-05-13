@@ -15,7 +15,14 @@ class InferenceStrategy(AgentStrategy):
     def __init__(self, *, reuse_threshold: float) -> None:
         self._reuse_threshold = reuse_threshold
 
-    def acquire_skill(self, *, task, obs, info: dict, candidates):
+    def acquire_skill(
+        self,
+        *,
+        task,
+        obs,
+        info: dict,
+        candidates,
+    ):
         if candidates and candidates[0].similarity >= self._reuse_threshold:
             best = candidates[0]
             logger.info("[Agent] reuse: %s", best.skill.name)

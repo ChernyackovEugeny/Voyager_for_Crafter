@@ -74,11 +74,16 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     call_id             TEXT PRIMARY KEY,
     session_id          TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
     episode_id          TEXT REFERENCES episodes(episode_id) ON DELETE SET NULL,
+    episode_num         INTEGER,
     call_type           TEXT NOT NULL,
+    model               TEXT,
     prompt_template_id  TEXT,
     prompt_hash         TEXT,
     tokens_in           INTEGER NOT NULL DEFAULT 0,
     tokens_out          INTEGER NOT NULL DEFAULT 0,
+    prompt_cache_hit_tokens  INTEGER NOT NULL DEFAULT 0,
+    prompt_cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens         INTEGER,
     cost_usd            DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     latency_ms          INTEGER NOT NULL DEFAULT 0,
     error               TEXT,
@@ -89,6 +94,14 @@ CREATE INDEX IF NOT EXISTS idx_llm_calls_session
     ON llm_calls (session_id, call_type);
 CREATE INDEX IF NOT EXISTS idx_llm_calls_hash
     ON llm_calls (prompt_hash);
+"""
+
+_MIGRATIONS = """
+ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS model TEXT;
+ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS episode_num INTEGER;
+ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS prompt_cache_hit_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS prompt_cache_miss_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS reasoning_tokens INTEGER;
 """
 
 
@@ -203,10 +216,15 @@ class RunLogger:
         *,
         call_type: str,
         episode_id: str | None = None,
+        episode_num: int | None = None,
         prompt_template_id: str | None = None,
         prompt_hash: str | None = None,
+        model: str | None = None,
         tokens_in: int = 0,
         tokens_out: int = 0,
+        prompt_cache_hit_tokens: int = 0,
+        prompt_cache_miss_tokens: int = 0,
+        reasoning_tokens: int | None = None,
         cost_usd: float = 0.0,
         latency_ms: int = 0,
         error: str | None = None,
@@ -218,15 +236,19 @@ class RunLogger:
                 cur.execute(
                     """
                     INSERT INTO llm_calls
-                        (call_id, session_id, episode_id, call_type,
-                         prompt_template_id, prompt_hash,
-                         tokens_in, tokens_out, cost_usd, latency_ms, error)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (call_id, session_id, episode_id, episode_num, call_type,
+                         model, prompt_template_id, prompt_hash,
+                         tokens_in, tokens_out,
+                         prompt_cache_hit_tokens, prompt_cache_miss_tokens,
+                         reasoning_tokens, cost_usd, latency_ms, error)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
-                        _uuid(), self.session_id, episode_id, call_type,
-                        prompt_template_id, prompt_hash,
-                        tokens_in, tokens_out, cost_usd, latency_ms, error,
+                        _uuid(), self.session_id, episode_id, episode_num, call_type,
+                        model, prompt_template_id, prompt_hash,
+                        tokens_in, tokens_out,
+                        prompt_cache_hit_tokens, prompt_cache_miss_tokens,
+                        reasoning_tokens, cost_usd, latency_ms, error,
                     ),
                 )
         except Exception as exc:
@@ -243,6 +265,7 @@ class RunLogger:
     def _init_schema(self) -> None:
         with self._conn.cursor() as cur:
             cur.execute(_DDL)
+            cur.execute(_MIGRATIONS)
 
     def _start_session(self) -> None:
         self._session_started_at = _now()

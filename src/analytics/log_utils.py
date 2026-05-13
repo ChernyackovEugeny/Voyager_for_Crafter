@@ -57,8 +57,13 @@ def log_llm_call_ok(
     latency_ms: int,
     cost_usd: float = 0.0,
     episode_id: str | None = None,
+    episode_num: int | None = None,
+    model: str | None = None,
     prompt_template_id: str | None = None,
     prompt_hash: str | None = None,
+    prompt_cache_hit_tokens: int = 0,
+    prompt_cache_miss_tokens: int = 0,
+    reasoning_tokens: int | None = None,
 ) -> None:
     """Successful LLM call."""
     if run_log is None:
@@ -66,10 +71,15 @@ def log_llm_call_ok(
     run_log.record_llm_call(
         call_type=call_type,
         episode_id=episode_id,
+        episode_num=episode_num,
+        model=model,
         prompt_template_id=prompt_template_id,
         prompt_hash=prompt_hash,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
+        prompt_cache_hit_tokens=prompt_cache_hit_tokens,
+        prompt_cache_miss_tokens=prompt_cache_miss_tokens,
+        reasoning_tokens=reasoning_tokens,
         cost_usd=cost_usd,
         latency_ms=latency_ms,
         error=None,
@@ -82,6 +92,8 @@ def log_llm_call_fail(
     call_type: str,
     error: BaseException | str,
     episode_id: str | None = None,
+    episode_num: int | None = None,
+    model: str | None = None,
     prompt_template_id: str | None = None,
     prompt_hash: str | None = None,
     latency_ms: int = 0,
@@ -92,6 +104,8 @@ def log_llm_call_fail(
     run_log.record_llm_call(
         call_type=call_type,
         episode_id=episode_id,
+        episode_num=episode_num,
+        model=model,
         prompt_template_id=prompt_template_id,
         prompt_hash=prompt_hash,
         tokens_in=0,

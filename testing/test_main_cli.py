@@ -15,6 +15,8 @@ class MainCliTests(unittest.TestCase):
         self.assertFalse(args.render)
         self.assertEqual(args.render_size, 512)
         self.assertEqual(args.render_step_delay, 0.05)
+        self.assertIsNone(args.episodes)
+        self.assertIsNone(args.early_stop_patience)
 
     def test_mode_argument(self):
         args = _parse_args(["--mode", "inference"])
@@ -35,6 +37,20 @@ class MainCliTests(unittest.TestCase):
     def test_skill_library_argument(self):
         args = _parse_args(["--skill-library", "skills_clean_001"])
         self.assertEqual(args.skill_library, "skills_clean_001")
+
+    def test_training_loop_arguments(self):
+        args = _parse_args([
+            "--episodes",
+            "25",
+            "--early-stop-patience",
+            "5",
+        ])
+        self.assertEqual(args.episodes, 25)
+        self.assertEqual(args.early_stop_patience, 5)
+
+    def test_deprecated_early_stop_window_alias(self):
+        args = _parse_args(["--early-stop-window", "3"])
+        self.assertEqual(args.early_stop_patience, 3)
 
 
 if __name__ == "__main__":
