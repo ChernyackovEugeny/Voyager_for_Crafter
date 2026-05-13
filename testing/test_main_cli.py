@@ -16,6 +16,9 @@ class MainCliTests(unittest.TestCase):
         self.assertEqual(args.render_size, 512)
         self.assertEqual(args.render_step_delay, 0.05)
         self.assertIsNone(args.episodes)
+        self.assertIsNone(args.seed)
+        self.assertIsNone(args.eval_id)
+        self.assertIsNone(args.eval_run_idx)
         self.assertIsNone(args.early_stop_patience)
 
     def test_mode_argument(self):
@@ -47,6 +50,19 @@ class MainCliTests(unittest.TestCase):
         ])
         self.assertEqual(args.episodes, 25)
         self.assertEqual(args.early_stop_patience, 5)
+
+    def test_reproducibility_and_eval_metadata_arguments(self):
+        args = _parse_args([
+            "--seed",
+            "123",
+            "--eval-id",
+            "eval_abc",
+            "--eval-run-idx",
+            "4",
+        ])
+        self.assertEqual(args.seed, 123)
+        self.assertEqual(args.eval_id, "eval_abc")
+        self.assertEqual(args.eval_run_idx, 4)
 
     def test_deprecated_early_stop_window_alias(self):
         args = _parse_args(["--early-stop-window", "3"])

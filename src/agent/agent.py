@@ -139,13 +139,17 @@ class Agent:
             )
         except SkillLoadError as exc:
             logger.warning("[Agent] load failed: %s | %s", task.name, exc)
-            self.strategy.on_task_failed(
+            failure_state = dict(state)
+            failure_state["failure_reason"] = "load_error"
+            failure_state["error_traceback"] = str(exc)
+            call = self.strategy.on_task_failed(
                 task=task,
                 source=source,
-                state=state,
+                state=failure_state,
                 skill_manager=self.skill_manager,
                 curriculum=self.curriculum,
             )
+            self._log_llm_call(call, call_type="reflection")
             return False, state, False
 
         self.current_skill = source.reused_name or function_name
@@ -168,13 +172,21 @@ class Agent:
                 skill_manager=self.skill_manager,
             )
         else:
-            self.strategy.on_task_failed(
+            failure_state = dict(final_state)
+            failure_state["failure_reason"] = (
+                "task_incomplete"
+                if result.reason == InterruptReason.COMPLETED
+                else result.reason.value
+            )
+            failure_state["error_traceback"] = result.error
+            call = self.strategy.on_task_failed(
                 task=task,
                 source=source,
-                state=final_state,
+                state=failure_state,
                 skill_manager=self.skill_manager,
                 curriculum=self.curriculum,
             )
+            self._log_llm_call(call, call_type="reflection")
 
         return result.reason == InterruptReason.EPISODE_DONE, final_state, False
 
@@ -217,9 +229,14 @@ class Agent:
         call = getattr(source, "llm_call", None)
         if call is None:
             return
+        self._log_llm_call(call, call_type="codegen")
+
+    def _log_llm_call(self, call, *, call_type: str) -> None:
+        if call is None:
+            return
         log_llm_call_ok(
             self.run_logger,
-            call_type="codegen",
+            call_type=call_type,
             episode_num=self._episode_num,
             model=call.model,
             tokens_in=call.tokens_in,

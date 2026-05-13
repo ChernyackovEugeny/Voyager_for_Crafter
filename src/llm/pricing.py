@@ -24,11 +24,15 @@ _PRICING_PER_MTOK: dict[str, ModelPricing] = {
         input_cache_miss=0.435,
         output=0.87,
     ),
+    "deepseek-reasoner": ModelPricing(
+        input_cache_hit=0.14,
+        input_cache_miss=0.55,
+        output=2.19,
+    ),
 }
 
 _MODEL_ALIASES: dict[str, str] = {
     "deepseek-chat": "deepseek-v4-flash",
-    "deepseek-reasoner": "deepseek-v4-flash",
 }
 
 

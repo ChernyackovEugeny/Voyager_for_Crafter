@@ -78,6 +78,20 @@ class SkillManager:
     def update_episodic_score(self, name: str, score: float) -> None:
         self._safe_update(name, episodic_score=score)
 
+    def get(self, name: str) -> SkillRecord | None:
+        """Return a stored skill record by name."""
+        return self._repo.get(name)
+
+    def update_code(self, name: str, new_code: str) -> None:
+        """Replace stored skill code while preserving description and embedding."""
+        try:
+            self._repo.update_code(name, new_code)
+        except KeyError:
+            logger.warning(
+                "SkillManager: skill %r missing on code update (skipping)",
+                name,
+            )
+
     def _most_similar_existing(self, query: np.ndarray) -> tuple[str | None, float]:
         names, embeddings = self._repo.all_embeddings()
         if not names:

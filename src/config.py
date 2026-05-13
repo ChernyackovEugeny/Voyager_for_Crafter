@@ -42,6 +42,10 @@ class LLMConfig(_BaseGroup):
     reflection_model: str = "deepseek-reasoner"
     curriculum_model: str = "deepseek-chat"
     codegen_temperature: float = 0.0
+    reflection_temperature: float = 0.1
+    reflection_timeout_s: float = 180.0
+    reflection_enabled: bool = True
+    max_reflections_per_skill: int = 3
     max_fix_attempts: int = 3
     request_timeout_s: float = 60.0
 
@@ -172,6 +176,26 @@ class AnalyticsConfig(_BaseGroup):
 
 
 # ---------------------------------------------------------------------------
+# Evaluation runner
+# ---------------------------------------------------------------------------
+
+class EvalConfig(_BaseGroup):
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8",
+        env_prefix="EVAL_", extra="ignore",
+    )
+
+    n_training_runs: int = 10
+    n_inference_seeds: int = 50
+    train_episodes: int = 100
+    inference_episodes: int = 1
+    last_k_training_episodes: int = 20
+    base_seed: int = 1000
+    inference_seed_base: int = 100_000
+    report_dir: str = "eval_reports"
+
+
+# ---------------------------------------------------------------------------
 # Aggregate
 # ---------------------------------------------------------------------------
 
@@ -187,6 +211,7 @@ class Settings:
         self.environment = EnvironmentConfig()
         self.logging = LoggingConfig()
         self.analytics = AnalyticsConfig()
+        self.eval = EvalConfig()
 
     def snapshot(self) -> dict:
         """Serializable config dump for analytics (config_snapshot column)."""
@@ -199,6 +224,7 @@ class Settings:
             "environment": self.environment.model_dump(),
             "logging": self.logging.model_dump(),
             "analytics": self.analytics.model_dump(),
+            "eval": self.eval.model_dump(),
         }
 
 

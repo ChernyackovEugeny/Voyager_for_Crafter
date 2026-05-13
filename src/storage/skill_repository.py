@@ -178,6 +178,21 @@ class ChromaSkillRepository:
     def count(self) -> int:
         return int(self._collection.count())
 
+    def reset_collection(self) -> None:
+        """Delete and recreate the current collection."""
+        try:
+            self._client.delete_collection(self._cfg.skills_collection)
+        except Exception:
+            logger.debug(
+                "ChromaSkillRepository reset: collection did not exist: %s",
+                self._cfg.skills_collection,
+            )
+        self._collection = self._client.get_or_create_collection(
+            name=self._cfg.skills_collection,
+            embedding_function=None,
+            metadata=self._COLLECTION_METADATA,
+        )
+
     def list_collections(self) -> list[str]:
         return sorted(
             collection.name if hasattr(collection, "name") else str(collection)
@@ -199,13 +214,31 @@ class ChromaSkillRepository:
         existing = self.get(name)
         if existing is None:
             raise KeyError(f"skill {name!r} not in library")
-        existing.success_count += success_delta
-        existing.fail_count += fail_delta
+        updates = {
+            "success_count": existing.success_count + success_delta,
+            "fail_count": existing.fail_count + fail_delta,
+        }
         if episodic_score is not None:
-            existing.episodic_score = episodic_score
+            updates["episodic_score"] = episodic_score
+        updated = existing.model_copy(update=updates)
         self._collection.update(
             ids=[name],
-            metadatas=[self._to_metadata(existing)],
+            metadatas=[self._to_metadata(updated)],
+        )
+
+    def update_code(self, name: str, new_code: str) -> None:
+        existing = self.get(name)
+        if existing is None:
+            raise KeyError(f"skill {name!r} not in library")
+        updated = existing.model_copy(
+            update={
+                "code": new_code,
+                "reflected_count": existing.reflected_count + 1,
+            }
+        )
+        self._collection.update(
+            ids=[name],
+            metadatas=[self._to_metadata(updated)],
         )
 
     def update_embedding(self, name: str, embedding: np.ndarray) -> None:
@@ -238,6 +271,7 @@ class ChromaSkillRepository:
             "code": s.code,
             "success_count": int(s.success_count),
             "fail_count": int(s.fail_count),
+            "reflected_count": int(s.reflected_count),
             "episodic_score": float(s.episodic_score),
             "created_at": s.created_at.isoformat(),
         }
@@ -250,6 +284,7 @@ class ChromaSkillRepository:
             description=document,
             success_count=int(meta.get("success_count", 0)),
             fail_count=int(meta.get("fail_count", 0)),
+            reflected_count=int(meta.get("reflected_count", 0)),
             episodic_score=float(meta.get("episodic_score", 0.0)),
             created_at=datetime.fromisoformat(meta["created_at"]),
         )

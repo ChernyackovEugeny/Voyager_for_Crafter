@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     started_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     finished_at         TIMESTAMPTZ,
     duration_sec        DOUBLE PRECISION,
+    status              TEXT NOT NULL DEFAULT 'running',
+    run_metadata        JSONB,
     config_snapshot     JSONB,
     final_achievements  JSONB,
     python_version      TEXT,
@@ -102,6 +104,8 @@ ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS episode_num INTEGER;
 ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS prompt_cache_hit_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS prompt_cache_miss_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS reasoning_tokens INTEGER;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'running';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS run_metadata JSONB;
 """
 
 
@@ -124,9 +128,14 @@ class RunLogger:
     every recording method becomes a no-op. The agent keeps running.
     """
 
-    def __init__(self, config_snapshot: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config_snapshot: dict[str, Any] | None = None,
+        run_metadata: dict[str, Any] | None = None,
+    ) -> None:
         self.session_id: str = _uuid()
         self._config_snapshot = config_snapshot or {}
+        self._run_metadata = run_metadata or {}
         self._conn: psycopg2.extensions.connection | None = None
         self._disabled: bool = False
         self._session_started_at: datetime | None = None
@@ -163,7 +172,8 @@ class RunLogger:
         if self._disabled or self._conn is None:
             return False
         try:
-            self._end_session()
+            status = "completed" if exc_type is None else "interrupted"
+            self._end_session(status=status)
         except Exception as exc:
             logger.warning("RunLogger: failed to finalize session: %s", exc)
         finally:
@@ -273,20 +283,22 @@ class RunLogger:
             cur.execute(
                 """
                 INSERT INTO sessions
-                    (session_id, started_at, config_snapshot,
+                    (session_id, started_at, status, run_metadata, config_snapshot,
                      python_version, hostname)
-                VALUES (%s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     self.session_id,
                     self._session_started_at,
+                    "running",
+                    json.dumps(self._run_metadata),
                     json.dumps(self._config_snapshot),
                     sys.version.split()[0],
                     platform.node(),
                 ),
             )
 
-    def _end_session(self) -> None:
+    def _end_session(self, *, status: str) -> None:
         finished_at = _now()
         duration = (
             (finished_at - self._session_started_at).total_seconds()
@@ -296,11 +308,14 @@ class RunLogger:
             cur.execute(
                 """
                 UPDATE sessions
-                SET finished_at = %s, duration_sec = %s, final_achievements = %s
+                SET finished_at = %s,
+                    duration_sec = %s,
+                    status = %s,
+                    final_achievements = %s
                 WHERE session_id = %s
                 """,
                 (
-                    finished_at, duration,
+                    finished_at, duration, status,
                     json.dumps(self._final_achievements) if self._final_achievements else None,
                     self.session_id,
                 ),

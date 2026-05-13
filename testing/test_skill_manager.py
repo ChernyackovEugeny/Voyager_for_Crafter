@@ -110,6 +110,19 @@ class SkillManagerTests(unittest.TestCase):
         self.assertEqual(skill.success_count, 2)
         self.assertEqual(skill.fail_count, 1)
 
+    def test_update_code_preserves_metrics_and_increments_reflection_count(self):
+        self.manager.save(name="wood", code="def f(state): yield 0", task="collect wood")
+        self.manager.record_success("wood")
+        self.manager.record_failure("wood")
+
+        self.manager.update_code("wood", "def f(state): yield 1")
+
+        skill = self.repo.get("wood")
+        self.assertEqual(skill.code, "def f(state): yield 1")
+        self.assertEqual(skill.success_count, 1)
+        self.assertEqual(skill.fail_count, 1)
+        self.assertEqual(skill.reflected_count, 1)
+
     def test_exists_reports_repository_presence(self):
         self.assertFalse(self.manager.exists("wood"))
         self.manager.save(name="wood", code="def f(state): yield 0", task="collect wood")

@@ -17,7 +17,10 @@ class CrafterEnv:
     Exposes action_space and observation_space for compatibility.
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, seed: int | None = None, **kwargs):
+        if seed is not None:
+            kwargs["seed"] = seed
+        self.seed = seed
         self._env = crafter.Env(**kwargs)
         self.action_space = self._env.action_space
         self.observation_space = self._env.observation_space

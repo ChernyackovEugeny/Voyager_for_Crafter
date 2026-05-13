@@ -15,6 +15,7 @@ from config import get_settings
 from environment.wrapper import CrafterEnv
 from llm.codegen import CodeGen
 from llm.curriculum import HardcodedCurriculum
+from llm.reflection import Reflection
 from observability.logging_config import configure_logging
 from skills.embedder import TextEmbedder
 from skills.skill_manager import SkillManager
@@ -58,6 +59,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Number of episodes to run in this session.",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Environment seed for reproducible single-session runs.",
+    )
+    parser.add_argument(
+        "--eval-id",
+        default=None,
+        help="Evaluation run identifier stored in analytics metadata.",
+    )
+    parser.add_argument(
+        "--eval-run-idx",
+        type=int,
+        default=None,
+        help="Training-run index stored in analytics metadata.",
+    )
+    parser.add_argument(
         "--early-stop-window",
         type=int,
         default=None,
@@ -91,7 +109,7 @@ def main(argv: list[str] | None = None) -> None:
     log.info("mode: %s", args.mode)
     log.info("skill library: %s", settings.chroma.skills_collection)
 
-    env = CrafterEnv(**settings.environment.crafter_kwargs)
+    env = CrafterEnv(seed=args.seed, **settings.environment.crafter_kwargs)
     executor = Executor(
         max_steps_per_skill=settings.executor.max_steps_per_skill,
         health_threshold=settings.executor.health_interrupt_threshold,
@@ -105,7 +123,18 @@ def main(argv: list[str] | None = None) -> None:
         config=settings.embedding,
     )
 
-    with RunLogger(config_snapshot=settings.snapshot()) as run_log:
+    run_metadata = {
+        "mode": args.mode,
+        "env_seed": args.seed,
+        "skill_library": settings.chroma.skills_collection,
+        "eval_id": args.eval_id,
+        "eval_run_idx": args.eval_run_idx,
+    }
+
+    with RunLogger(
+        config_snapshot=settings.snapshot(),
+        run_metadata=run_metadata,
+    ) as run_log:
         log.info(
             "running episodes: count=%d early_stop_patience=%d session=%s",
             episodes,
@@ -122,6 +151,11 @@ def main(argv: list[str] | None = None) -> None:
             strategy = TrainingStrategy(
                 codegen=CodeGen(),
                 reuse_threshold=settings.embedding.similarity_reuse_threshold,
+                reflection=Reflection() if settings.llm.reflection_enabled else None,
+                reflection_enabled=settings.llm.reflection_enabled,
+                max_reflections_per_skill=(
+                    settings.llm.max_reflections_per_skill
+                ),
             )
         else:
             strategy = InferenceStrategy(
