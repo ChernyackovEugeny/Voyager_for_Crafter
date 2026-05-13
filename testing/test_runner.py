@@ -188,6 +188,28 @@ class TestSkillLoader(unittest.TestCase):
         gen = func({})
         self.assertEqual(next(gen), 5)
 
+    def test_extra_skill_bare_return_preserves_latest_state_for_yield_from(self):
+        helper = (
+            "def scout_area(state):\n"
+            "    state = yield 5\n"
+            "    return\n"
+        )
+        main = (
+            "def collect_drink(state):\n"
+            "    state = yield from scout_safely(state)\n"
+            "    state['kept'] = True\n"
+            "    return state\n"
+        )
+        _, func = load_skill(main, extra_skills=[("scout_safely", helper)])
+        initial = {"kept": False}
+        updated = {"kept": False}
+        gen = func(initial)
+        self.assertEqual(next(gen), 5)
+        with self.assertRaises(StopIteration) as ctx:
+            gen.send(updated)
+        self.assertIs(ctx.exception.value, updated)
+        self.assertTrue(updated["kept"])
+
     def test_extra_skill_is_callable_by_repository_alias(self):
         helper = (
             "def scout_area(state):\n"

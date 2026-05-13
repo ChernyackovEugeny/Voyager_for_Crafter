@@ -401,6 +401,23 @@ class TestExecutor(unittest.TestCase):
         result = ex.run(skill, env, state(), danger_interrupt_enabled=True)
         self.assertEqual(result.reason, InterruptReason.DANGER_VISIBLE)
 
+    def test_danger_warmup_lets_skill_try_escape_before_interrupt(self):
+        ex = Executor(
+            max_steps_per_skill=50,
+            health_threshold=4,
+            min_steps_before_danger_interrupt=3,
+        )
+        current = state_with_visible("zombie")
+        env = FakeEnv([("obs", 0.0, False, False, current["info"])])
+
+        def skill(current):
+            while True:
+                current = yield 0
+
+        result = ex.run(skill, env, state(), danger_interrupt_enabled=True)
+        self.assertEqual(result.reason, InterruptReason.DANGER_VISIBLE)
+        self.assertEqual(result.steps, 3)
+
     def test_health_warmup_lets_skill_act_before_interrupt(self):
         ex = Executor(
             max_steps_per_skill=50,

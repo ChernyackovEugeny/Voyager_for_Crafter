@@ -188,6 +188,25 @@ def move_away_from_hostile(state: dict) -> int:
     if threat is None:
         return move_up()
     px, py = get_position(state)
+    semantic = state["info"].get("semantic")
+
+    best_action: int | None = None
+    best_score = abs(px - threat[0]) + abs(py - threat[1])
+    for dx, dy in _DIRS:
+        nx, ny = px + dx, py + dy
+        if semantic is not None:
+            if not (0 <= nx < _MAP_W and 0 <= ny < _MAP_H):
+                continue
+            if int(semantic[nx, ny]) not in _WALKABLE_IDS:
+                continue
+        score = abs(nx - threat[0]) + abs(ny - threat[1])
+        if score > best_score:
+            best_score = score
+            best_action = _DIR_TO_ACTION[(dx, dy)]
+
+    if best_action is not None:
+        return best_action
+
     dx = px - threat[0]
     dy = py - threat[1]
     if abs(dx) >= abs(dy):

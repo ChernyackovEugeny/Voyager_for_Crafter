@@ -31,5 +31,6 @@ class SkillRecord(BaseModel):
     success_count: int = 0
     fail_count: int = 0
     reflected_count: int = 0
+    fix_count: int = 0
     episodic_score: float = 0.0
     created_at: datetime = Field(default_factory=_utcnow)

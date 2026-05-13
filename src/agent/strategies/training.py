@@ -47,6 +47,7 @@ class TrainingStrategy(AgentStrategy):
         self._pending_llm_calls: list[tuple[str, object]] = []
         self._last_codegen_failure: dict[str, tuple[str, str]] = {}
         self._pending_fixed_sources: dict[str, SkillSource] = {}
+        self._runtime_fix_attempts: dict[tuple[str, str], int] = {}
 
     def acquire_skill(
         self,
@@ -357,9 +358,27 @@ class TrainingStrategy(AgentStrategy):
     def _fix_reused_technical_error(self, *, task, source, state, skill_manager):
         if not self._is_technical_error(state):
             return None
+        error_key = self._runtime_error_key(source.reused_name, state)
+        if error_key is not None:
+            attempts = self._runtime_fix_attempts.get(error_key, 0)
+            if attempts >= self._max_fix_attempts:
+                logger.info(
+                    "[Agent] runtime fix skipped: repeated error limit reached "
+                    "for %s: %s",
+                    source.reused_name,
+                    error_key[1],
+                )
+                return None
+            self._runtime_fix_attempts[error_key] = attempts + 1
         fixed_call = self._call_bug_fixer(task=task, source=source, state=state)
         if fixed_call is None:
             return None
+        if fixed_call.code.strip() == source.code.strip():
+            logger.warning(
+                "[Agent] runtime fix returned identical code for %s",
+                source.reused_name,
+            )
+            return ("fix_bug", fixed_call)
         try:
             self._validate_skill(
                 fixed_call.code,
@@ -373,7 +392,13 @@ class TrainingStrategy(AgentStrategy):
                 exc,
             )
             return ("fix_bug", fixed_call)
-        skill_manager.update_code(source.reused_name, fixed_call.code)
+        self._update_skill_code(
+            skill_manager,
+            source.reused_name,
+            fixed_call.code,
+            task=task.description,
+            update_kind="fix",
+        )
         logger.info("[Agent] runtime fix: updated %s", source.reused_name)
         return ("fix_bug", fixed_call)
 
@@ -495,7 +520,13 @@ class TrainingStrategy(AgentStrategy):
             )
             return call
 
-        skill_manager.update_code(skill.name, call.code)
+        self._update_skill_code(
+            skill_manager,
+            skill.name,
+            call.code,
+            task=task.description,
+            update_kind="reflection",
+        )
         logger.info("[Agent] reflection: updated %s", skill.name)
         return call
 
@@ -547,6 +578,33 @@ class TrainingStrategy(AgentStrategy):
     @staticmethod
     def _source_extra_skills(source) -> tuple[tuple[str, str], ...]:
         return tuple(getattr(source, "extra_skills", ()))
+
+    @staticmethod
+    def _update_skill_code(
+        skill_manager,
+        name: str,
+        code: str,
+        *,
+        task: str,
+        update_kind: str,
+    ) -> None:
+        try:
+            skill_manager.update_code(
+                name,
+                code,
+                task=task,
+                update_kind=update_kind,
+            )
+        except TypeError:
+            skill_manager.update_code(name, code)
+
+    @staticmethod
+    def _runtime_error_key(skill_name: str | None, state: dict) -> tuple[str, str] | None:
+        if skill_name is None:
+            return None
+        traceback = str(state.get("error_traceback") or "")
+        first_line = traceback.splitlines()[0] if traceback else "unknown runtime error"
+        return skill_name, first_line[:200]
 
     @staticmethod
     def _unique_skill_name(base: str, skill_manager) -> str:

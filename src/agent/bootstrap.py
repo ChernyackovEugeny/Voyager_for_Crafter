@@ -27,7 +27,17 @@ BOOTSTRAP_SKILLS: tuple[BootstrapSkillSpec, ...] = (
             "of movement functions. Do not walk in a four-cell circle; use "
             "expanding sweeps or longer segments before turning. Guard every "
             "optional coordinate with `if coords is not None` before indexing, "
-            "go_to, save_in_memory, or set_home."
+            "go_to, save_in_memory, or set_home. End with return state, not "
+            "bare return."
+        ),
+    ),
+    BootstrapSkillSpec(
+        name="collect_wood",
+        description=(
+            "Find a visible or remembered tree, go adjacent to it, chop until "
+            "collect_wood is unlocked or enough wood is available, and save tree "
+            "coordinates when found. Avoid visible hostiles and end with return "
+            "state."
         ),
     ),
     BootstrapSkillSpec(
@@ -39,6 +49,7 @@ BOOTSTRAP_SKILLS: tuple[BootstrapSkillSpec, ...] = (
             "every yielded action. Do not call explore_for, find_water, "
             "go_to_water, or find_and_drink_water. Do not walk in a four-cell "
             "circle. Guard remembered or visible water coordinates before use."
+            " End with return state, not bare return."
         ),
     ),
     BootstrapSkillSpec(
@@ -49,6 +60,7 @@ BOOTSTRAP_SKILLS: tuple[BootstrapSkillSpec, ...] = (
             "eat_cow is unlocked. Check hostiles after every yielded action and "
             "do not call explore_for or invented helper functions. Guard all "
             "remembered or visible food coordinates before use."
+            " End with return state, not bare return."
         ),
     ),
     BootstrapSkillSpec(
@@ -59,6 +71,7 @@ BOOTSTRAP_SKILLS: tuple[BootstrapSkillSpec, ...] = (
             "table location, then retreat from visible hostiles. Do not call "
             "explore_for. Guard any grass, tree, or table coordinates before "
             "go_to, save_in_memory, or indexing."
+            " End with return state, not bare return."
         ),
     ),
     BootstrapSkillSpec(
@@ -73,9 +86,250 @@ BOOTSTRAP_SKILLS: tuple[BootstrapSkillSpec, ...] = (
             "get_memory('water'). Do not call explore_for or invented helper "
             "functions. Do not walk in a four-cell circle. Guard remembered "
             "water, food, and home coordinates before go_to or indexing."
+            " End with return state, not bare return."
         ),
     ),
 )
+
+
+BOOTSTRAP_CODE: dict[str, str] = {
+    "scout_safely": """\
+def scout_area(state):
+    direction = 0
+    segment_len = 4
+    segment_progress = 0
+    turns = 0
+    for step in range(60):
+        if is_hostile_visible(state):
+            state = yield move_away_from_hostile(state)
+            continue
+        for name in ("water", "cow", "tree", "stone", "coal", "table"):
+            coords = find_nearest(name, state)
+            if coords is not None:
+                save_in_memory(name, coords)
+        if get_home() is None:
+            set_home(get_position(state))
+        if direction == 0:
+            state = yield move_right()
+        elif direction == 1:
+            state = yield move_down()
+        elif direction == 2:
+            state = yield move_left()
+        else:
+            state = yield move_up()
+        segment_progress += 1
+        if segment_progress >= segment_len:
+            direction = (direction + 1) % 4
+            segment_progress = 0
+            turns += 1
+            if turns % 2 == 0:
+                segment_len += 2
+    return state
+""",
+    "collect_wood": """\
+def collect_wood(state):
+    if state["info"]["inventory"].get("wood", 0) >= 3:
+        return state
+    tree_coords = get_memory().get("tree")
+    direction = 0
+    segment_len = 4
+    segment_progress = 0
+    turns = 0
+    for step in range(80):
+        if state["info"]["inventory"].get("wood", 0) >= 3:
+            return state
+        if is_hostile_visible(state):
+            state = yield move_away_from_hostile(state)
+            continue
+        if tree_coords is None:
+            tree_coords = find_nearest("tree", state)
+            if tree_coords is not None:
+                save_in_memory("tree", tree_coords)
+        if tree_coords is not None:
+            state = yield from go_to(tree_coords, state)
+            for _ in range(5):
+                if state["info"]["inventory"].get("wood", 0) >= 3:
+                    return state
+                if is_hostile_visible(state):
+                    state = yield move_away_from_hostile(state)
+                    break
+                state = yield do_action()
+            tree_coords = None
+            continue
+        if direction == 0:
+            state = yield move_right()
+        elif direction == 1:
+            state = yield move_down()
+        elif direction == 2:
+            state = yield move_left()
+        else:
+            state = yield move_up()
+        segment_progress += 1
+        if segment_progress >= segment_len:
+            direction = (direction + 1) % 4
+            segment_progress = 0
+            turns += 1
+            if turns % 2 == 0:
+                segment_len += 2
+    return state
+""",
+    "collect_drink": """\
+def collect_drink(state):
+    if state["info"]["achievements"].get("collect_drink", 0):
+        return state
+    water_coords = get_memory().get("water")
+    direction = 0
+    segment_len = 4
+    segment_progress = 0
+    turns = 0
+    for step in range(90):
+        if state["info"]["achievements"].get("collect_drink", 0):
+            return state
+        if is_hostile_visible(state):
+            state = yield move_away_from_hostile(state)
+            continue
+        if water_coords is None:
+            water_coords = find_nearest("water", state)
+            if water_coords is not None:
+                save_in_memory("water", water_coords)
+        if water_coords is not None:
+            state = yield from go_to(water_coords, state)
+            for _ in range(6):
+                if state["info"]["achievements"].get("collect_drink", 0):
+                    return state
+                if is_hostile_visible(state):
+                    state = yield move_away_from_hostile(state)
+                    break
+                state = yield do_action()
+            water_coords = get_memory().get("water")
+            continue
+        if direction == 0:
+            state = yield move_right()
+        elif direction == 1:
+            state = yield move_down()
+        elif direction == 2:
+            state = yield move_left()
+        else:
+            state = yield move_up()
+        segment_progress += 1
+        if segment_progress >= segment_len:
+            direction = (direction + 1) % 4
+            segment_progress = 0
+            turns += 1
+            if turns % 2 == 0:
+                segment_len += 2
+    return state
+""",
+    "eat_cow": """\
+def find_and_eat_food(state):
+    if state["info"]["achievements"].get("eat_cow", 0):
+        return state
+    food_coords = get_memory().get("cow")
+    direction = 0
+    segment_len = 4
+    segment_progress = 0
+    turns = 0
+    for step in range(120):
+        if state["info"]["achievements"].get("eat_cow", 0):
+            return state
+        if is_hostile_visible(state):
+            state = yield move_away_from_hostile(state)
+            continue
+        visible_cow = find_nearest("cow", state)
+        if visible_cow is not None:
+            food_coords = visible_cow
+            save_in_memory("cow", food_coords)
+        if food_coords is not None:
+            state = yield from go_to(food_coords, state)
+            for _ in range(8):
+                if state["info"]["achievements"].get("eat_cow", 0):
+                    return state
+                if is_hostile_visible(state):
+                    state = yield move_away_from_hostile(state)
+                    break
+                state = yield do_action()
+            food_coords = None
+            continue
+        if direction == 0:
+            state = yield move_right()
+        elif direction == 1:
+            state = yield move_down()
+        elif direction == 2:
+            state = yield move_left()
+        else:
+            state = yield move_up()
+        segment_progress += 1
+        if segment_progress >= segment_len:
+            direction = (direction + 1) % 4
+            segment_progress = 0
+            turns += 1
+            if turns % 2 == 0:
+                segment_len += 2
+    return state
+""",
+    "build_shelter": """\
+def build_minimal_base(state):
+    if state["info"]["achievements"].get("place_table", 0):
+        if get_home() is None:
+            set_home(get_position(state))
+        return state
+    if state["info"]["inventory"].get("wood", 0) < 3:
+        state = yield from collect_wood(state)
+    if state["info"]["inventory"].get("wood", 0) < 2:
+        return state
+    safe_ground = None
+    for name in ("grass", "sand", "path"):
+        coords = find_nearest(name, state)
+        if coords is not None:
+            safe_ground = coords
+            break
+    if safe_ground is not None:
+        state = yield from go_to(safe_ground, state)
+    for _ in range(3):
+        if is_hostile_visible(state):
+            state = yield move_away_from_hostile(state)
+        else:
+            break
+    state = yield place("table")
+    table_coords = find_nearest("table", state)
+    if table_coords is not None:
+        save_in_memory("table", table_coords)
+    set_home(get_position(state))
+    return state
+""",
+    "survive": """\
+def survive_first_night(state):
+    for _ in range(5):
+        if is_hostile_visible(state):
+            state = yield move_away_from_hostile(state)
+        else:
+            break
+    inv = state["info"]["inventory"]
+    if inv.get("drink", 9) < 7:
+        state = yield from collect_drink(state)
+    inv = state["info"]["inventory"]
+    if inv.get("food", 9) < 7:
+        state = yield from eat_cow(state)
+    inv = state["info"]["inventory"]
+    if inv.get("energy", 9) < 4 and not is_hostile_visible(state):
+        home = get_home()
+        if home is not None:
+            state = yield from go_to(home, state)
+        for _ in range(6):
+            if state["info"]["inventory"].get("energy", 9) >= 8:
+                break
+            if is_hostile_visible(state):
+                state = yield move_away_from_hostile(state)
+                break
+            state = yield sleep_action()
+    for _ in range(5):
+        if is_hostile_visible(state):
+            state = yield move_away_from_hostile(state)
+        else:
+            break
+    return state
+""",
+}
 
 
 BOOTSTRAP_STATE_TEXT = (
@@ -130,6 +384,55 @@ def bootstrap_initial_skills(
                 "code": existing.code,
             })
     for spec in missing_specs:
+        deterministic_code = BOOTSTRAP_CODE.get(spec.name)
+        if deterministic_code is not None:
+            try:
+                skill_validator(
+                    deterministic_code,
+                    allowed_skill_names={
+                        entry["name"] for entry in generated_context
+                    },
+                    extra_skills=tuple(
+                        (entry["name"], entry["code"])
+                        for entry in generated_context
+                    ),
+                )
+                try:
+                    result = skill_manager.save(
+                        name=spec.name,
+                        code=deterministic_code,
+                        task=spec.description,
+                        deduplicate=False,
+                    )
+                except TypeError:
+                    result = skill_manager.save(
+                        name=spec.name,
+                        code=deterministic_code,
+                        task=spec.description,
+                    )
+                if result.outcome == "ok":
+                    skill_manager.record_success(spec.name)
+                    generated_context.append({
+                        "name": spec.name,
+                        "description": spec.description,
+                        "code": deterministic_code,
+                    })
+                    saved += 1
+                    logger.info("[Bootstrap] saved deterministic %s", spec.name)
+                    continue
+                logger.info(
+                    "[Bootstrap] did not save deterministic %s: outcome=%s",
+                    spec.name,
+                    result.outcome,
+                )
+                continue
+            except Exception as exc:
+                logger.warning(
+                    "[Bootstrap] deterministic validation failed for %s: %s",
+                    spec.name,
+                    exc,
+                )
+
         previous_failure: tuple[str, str] | None = None
         for attempt in range(1, BOOTSTRAP_ATTEMPTS + 1):
             if attempt == 1:

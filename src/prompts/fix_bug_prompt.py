@@ -33,6 +33,8 @@ Skill contract:
 - Do not call a variable that contains a function. Use direct calls such as
   `move_right()` or `move_down()` inside if/elif branches.
 - Do not create helper functions or top-level statements.
+- End successful paths with `return state`. Replace bare `return` with
+  `return state` unless the function has not yet yielded any updated state.
 - Preserve the original function name and purpose whenever possible.
 
 Return only the corrected function in a ```python ... ``` fenced block.

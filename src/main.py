@@ -189,6 +189,9 @@ def main(argv: list[str] | None = None) -> None:
         min_steps_before_health_interrupt=(
             settings.executor.min_steps_before_health_interrupt
         ),
+        min_steps_before_danger_interrupt=(
+            settings.executor.min_steps_before_danger_interrupt
+        ),
         render=args.render,
         render_size=args.render_size,
         render_delay_s=args.render_step_delay,

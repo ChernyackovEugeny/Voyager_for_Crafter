@@ -137,6 +137,7 @@ class ExecutorConfig(_BaseGroup):
     min_steps_before_stagnation_interrupt: int = 20
     max_consecutive_task_failures: int = 3
     min_reflection_steps: int = 3
+    min_steps_before_danger_interrupt: int = 5
 
 
 # ---------------------------------------------------------------------------

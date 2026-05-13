@@ -49,6 +49,7 @@ class Executor:
         stagnation_window: int = 0,
         min_steps_before_stagnation_interrupt: int = 0,
         min_steps_before_health_interrupt: int = 0,
+        min_steps_before_danger_interrupt: int = 0,
     ) -> None:
         self._max_steps = max_steps_per_skill
         self._health_threshold = health_threshold
@@ -62,6 +63,7 @@ class Executor:
             min_steps_before_stagnation_interrupt
         )
         self._min_steps_before_health_interrupt = min_steps_before_health_interrupt
+        self._min_steps_before_danger_interrupt = min_steps_before_danger_interrupt
 
     def run(
         self,
@@ -106,7 +108,11 @@ class Executor:
                         info,
                         achievements_before,
                     )
-                if danger_interrupt_enabled and hostile_visible(info):
+                if (
+                    danger_interrupt_enabled
+                    and steps >= self._min_steps_before_danger_interrupt
+                    and hostile_visible(info)
+                ):
                     logger.info("executor: danger interrupt at step %d", steps)
                     return self._make_result(
                         InterruptReason.DANGER_VISIBLE,

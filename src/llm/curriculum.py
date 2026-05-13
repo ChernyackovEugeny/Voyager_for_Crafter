@@ -141,11 +141,16 @@ class HardcodedCurriculum:
         """Return the first unfinished unlocked achievement, or None if done."""
         completed = self._completed_from_info(info)
         skipped = skip or set()
-        if hostile_visible(info):
+        if "survive" not in skipped and hostile_visible(info):
             return make_survive_task(Task)
         if "survive" not in skipped and is_in_danger(info, self._survival):
             return make_survive_task(Task)
-        survival_task = _survival_foundation_task(info, completed, skipped)
+        survival_task = _survival_foundation_task(
+            info,
+            completed,
+            skipped,
+            require_wood_before_shelter=True,
+        )
         if survival_task is not None:
             return survival_task
         for achievement_key in TECH_TREE_ORDER:
@@ -246,13 +251,18 @@ class LLMCurriculum:
         skip: set[str] | None = None,
     ) -> Task | None:
         skipped = skip or set()
-        if hostile_visible(info):
+        if "survive" not in skipped and hostile_visible(info):
             return make_survive_task(Task)
         if "survive" not in skipped and is_in_danger(info, self._survival):
             return make_survive_task(Task)
 
         completed = _completed_from_info(info)
-        survival_task = _survival_foundation_task(info, completed, skipped)
+        survival_task = _survival_foundation_task(
+            info,
+            completed,
+            skipped,
+            require_wood_before_shelter=False,
+        )
         if survival_task is not None:
             return survival_task
         if len(completed) >= len(ACHIEVEMENTS):
@@ -471,6 +481,8 @@ def _survival_foundation_task(
     info: dict[str, Any],
     completed: set[str],
     skipped: set[str],
+    *,
+    require_wood_before_shelter: bool = True,
 ) -> Task | None:
     """Prioritize water, food, and a remembered base before achievement chasing."""
     if "collect_drink" not in completed and "collect_drink" not in skipped:
@@ -490,6 +502,16 @@ def _survival_foundation_task(
                 "memory, approach safely, and eat until eat_cow is unlocked."
             ),
             achievement_key="eat_cow",
+        )
+    if (
+        require_wood_before_shelter
+        and "collect_wood" not in completed
+        and "collect_wood" not in skipped
+    ):
+        return Task(
+            name="collect-wood",
+            description=ACHIEVEMENTS["collect_wood"].description,
+            achievement_key="collect_wood",
         )
     if "place_table" not in completed and "build-shelter" not in skipped:
         return Task(

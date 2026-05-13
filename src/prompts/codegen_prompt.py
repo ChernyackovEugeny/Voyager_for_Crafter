@@ -327,6 +327,8 @@ Do not call `explore_for`; it is not available.
 - Function name: snake_case, descriptive of the task.
 - The function MUST accept exactly one argument named `state`.
 - The function MUST be a generator (contain at least one `yield`).
+- End successful paths with `return state`. Do not use bare `return`; callers
+  may invoke this skill with `state = yield from your_skill(state)`.
 - Apply the yield/send protocol correctly (`state = yield <action>`).
 - The function should usually yield many actions, not just one.
 - If a target is not visible, explore in a loop and keep checking again.

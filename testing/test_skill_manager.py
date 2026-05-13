@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from config import EmbeddingConfig
 from skills.skill_manager import SkillManager
+from storage.schemas import SkillRecord
 from storage.in_memory_skill_repository import InMemorySkillRepository
 
 
@@ -110,18 +111,49 @@ class SkillManagerTests(unittest.TestCase):
         self.assertEqual(skill.success_count, 2)
         self.assertEqual(skill.fail_count, 1)
 
+    def test_retrieve_penalizes_repeated_failures(self):
+        self.repo.add(
+            SkillRecord(name="good", code="def f(state): yield 0", description="collect wood"),
+            np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        )
+        self.repo.add(
+            SkillRecord(name="bad", code="def f(state): yield 0", description="collect wood"),
+            np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        )
+        for _ in range(10):
+            self.manager.record_failure("bad")
+        self.manager.record_success("good")
+
+        candidates = self.manager.retrieve("collect wood", k=2)
+
+        self.assertEqual(candidates[0].skill.name, "good")
+
     def test_update_code_preserves_metrics_and_increments_reflection_count(self):
         self.manager.save(name="wood", code="def f(state): yield 0", task="collect wood")
         self.manager.record_success("wood")
         self.manager.record_failure("wood")
 
-        self.manager.update_code("wood", "def f(state): yield 1")
+        self.manager.update_code("wood", "def f(state): yield do_action()")
 
         skill = self.repo.get("wood")
-        self.assertEqual(skill.code, "def f(state): yield 1")
+        self.assertEqual(skill.code, "def f(state): yield do_action()")
         self.assertEqual(skill.success_count, 1)
         self.assertEqual(skill.fail_count, 1)
         self.assertEqual(skill.reflected_count, 1)
+        self.assertEqual(skill.description, "collect wood. Uses: do_action")
+
+    def test_update_code_can_count_runtime_fix_separately(self):
+        self.manager.save(name="wood", code="def f(state): yield 0", task="collect wood")
+
+        self.manager.update_code(
+            "wood",
+            "def f(state): yield 1",
+            update_kind="fix",
+        )
+
+        skill = self.repo.get("wood")
+        self.assertEqual(skill.reflected_count, 0)
+        self.assertEqual(skill.fix_count, 1)
 
     def test_exists_reports_repository_presence(self):
         self.assertFalse(self.manager.exists("wood"))

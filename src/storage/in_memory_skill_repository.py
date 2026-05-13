@@ -85,16 +85,29 @@ class InMemorySkillRepository:
             updates["episodic_score"] = episodic_score
         self._skills[name] = existing.model_copy(update=updates)
 
-    def update_code(self, name: str, new_code: str) -> None:
+    def update_code(
+        self,
+        name: str,
+        new_code: str,
+        *,
+        description: str | None = None,
+        embedding: np.ndarray | None = None,
+        reflected_delta: int = 1,
+        fix_delta: int = 0,
+    ) -> None:
         if name not in self._skills:
             raise KeyError(f"skill {name!r} not in library")
         existing = self._skills[name]
         self._skills[name] = existing.model_copy(
             update={
                 "code": new_code,
-                "reflected_count": existing.reflected_count + 1,
+                "description": description or existing.description,
+                "reflected_count": existing.reflected_count + reflected_delta,
+                "fix_count": existing.fix_count + fix_delta,
             }
         )
+        if embedding is not None:
+            self._embeddings[name] = np.asarray(embedding, dtype=np.float32)
 
     def update_embedding(self, name: str, embedding: np.ndarray) -> None:
         if name not in self._skills:

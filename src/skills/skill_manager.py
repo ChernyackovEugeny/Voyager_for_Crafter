@@ -73,8 +73,18 @@ class SkillManager:
         """Return top-k similar skills for the task text."""
         limit = k if k is not None else self._cfg.top_k
         embedding = self._normalize_vector(self._embedder.encode(task_text))
-        pairs = self._repo.search(embedding, k=limit)
-        return [SkillCandidate(skill=skill, similarity=sim) for skill, sim in pairs]
+        # Fetch a wider window, then rerank by observed reliability. Similarity
+        # remains the public score so strategy thresholds keep their meaning.
+        pairs = self._repo.search(embedding, k=max(limit * 3, limit))
+        candidates = [SkillCandidate(skill=skill, similarity=sim) for skill, sim in pairs]
+        candidates.sort(
+            key=lambda candidate: (
+                self._retrieval_score(candidate.skill, candidate.similarity),
+                candidate.similarity,
+            ),
+            reverse=True,
+        )
+        return candidates[:limit]
 
     def exists(self, name: str) -> bool:
         """Return True if a skill with this repository name already exists."""
@@ -103,15 +113,50 @@ class SkillManager:
             return len(skills())
         return int(count())
 
-    def update_code(self, name: str, new_code: str) -> None:
+    def update_code(
+        self,
+        name: str,
+        new_code: str,
+        *,
+        task: str | None = None,
+        update_kind: str = "reflection",
+    ) -> None:
         """Replace stored skill code while preserving description and embedding."""
         try:
-            self._repo.update_code(name, new_code)
+            existing = self._repo.get(name)
+            description = None
+            embedding = None
+            if existing is not None:
+                base_task = task or existing.description.split(". Uses:", 1)[0]
+                description = compose_description(name, base_task, new_code)
+                embedding = self._normalize_vector(self._embedder.encode(base_task))
+            try:
+                self._repo.update_code(
+                    name,
+                    new_code,
+                    description=description,
+                    embedding=embedding,
+                    reflected_delta=1 if update_kind == "reflection" else 0,
+                    fix_delta=1 if update_kind == "fix" else 0,
+                )
+            except TypeError:
+                self._repo.update_code(name, new_code)
+                if embedding is not None:
+                    self._repo.update_embedding(name, embedding)
         except KeyError:
             logger.warning(
                 "SkillManager: skill %r missing on code update (skipping)",
                 name,
             )
+
+    @staticmethod
+    def _retrieval_score(skill: SkillRecord, similarity: float) -> float:
+        attempts = skill.success_count + skill.fail_count
+        if attempts <= 0:
+            return similarity
+        reliability = (skill.success_count + 1.0) / (attempts + 2.0)
+        fail_penalty = min(0.30, 0.04 * skill.fail_count)
+        return similarity + 0.10 * (reliability - 0.5) - fail_penalty
 
     def _most_similar_existing(self, query: np.ndarray) -> tuple[str | None, float]:
         names, embeddings = self._repo.all_embeddings()

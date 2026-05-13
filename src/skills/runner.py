@@ -410,6 +410,39 @@ def _build_namespace(runtime: SkillRuntime | None) -> dict[str, Any]:
     return namespace
 
 
+def _wrap_skill_returns_state(func: Callable) -> Callable:
+    """Make old saved skills safe when called with `yield from`.
+
+    Historic skills often use bare `return`, which makes `yield from skill(state)`
+    evaluate to None. The wrapper preserves normal yielded actions while
+    replacing a missing StopIteration.value with the latest state sent by the
+    executor.
+    """
+
+    def wrapped(state):
+        latest_state = state
+        gen = func(state)
+        try:
+            action = next(gen)
+            while True:
+                try:
+                    sent_state = yield action
+                except GeneratorExit:
+                    raise
+                if sent_state is not None:
+                    latest_state = sent_state
+                try:
+                    action = gen.send(sent_state)
+                except StopIteration as stop:
+                    return stop.value if stop.value is not None else latest_state
+        except StopIteration as stop:
+            return stop.value if stop.value is not None else latest_state
+
+    wrapped.__name__ = getattr(func, "__name__", "wrapped_skill")
+    wrapped.__doc__ = getattr(func, "__doc__", None)
+    return wrapped
+
+
 def _memory_namespace(memory: Any) -> dict[str, Any]:
     return {
         "get_memory": memory.get_memory,
@@ -483,7 +516,9 @@ def load_skill(
                 )
                 extra_func = namespace.get(extra_func_def.name)
                 if callable(extra_func):
-                    namespace[extra_name] = extra_func
+                    wrapped_extra = _wrap_skill_returns_state(extra_func)
+                    namespace[extra_func_def.name] = wrapped_extra
+                    namespace[extra_name] = wrapped_extra
                     loaded_extra_names.add(extra_name)
             except (SkillLoadError, SyntaxError, Exception) as exc:
                 failed_extra_errors[extra_name] = str(exc)
@@ -504,4 +539,4 @@ def load_skill(
     func = namespace.get(func_name)
     if not callable(func):
         raise SkillLoadError(f"top-level def '{func_name}' did not produce a callable")
-    return func_name, func
+    return func_name, _wrap_skill_returns_state(func)

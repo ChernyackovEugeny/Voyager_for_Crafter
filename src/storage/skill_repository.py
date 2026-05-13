@@ -226,20 +226,40 @@ class ChromaSkillRepository:
             metadatas=[self._to_metadata(updated)],
         )
 
-    def update_code(self, name: str, new_code: str) -> None:
+    def update_code(
+        self,
+        name: str,
+        new_code: str,
+        *,
+        description: str | None = None,
+        embedding: np.ndarray | None = None,
+        reflected_delta: int = 1,
+        fix_delta: int = 0,
+    ) -> None:
         existing = self.get(name)
         if existing is None:
             raise KeyError(f"skill {name!r} not in library")
         updated = existing.model_copy(
             update={
                 "code": new_code,
-                "reflected_count": existing.reflected_count + 1,
+                "description": description or existing.description,
+                "reflected_count": existing.reflected_count + reflected_delta,
+                "fix_count": existing.fix_count + fix_delta,
             }
         )
-        self._collection.update(
-            ids=[name],
-            metadatas=[self._to_metadata(updated)],
-        )
+        kwargs = {"ids": [name], "metadatas": [self._to_metadata(updated)]}
+        if description is not None:
+            # Chroma collection has embedding_function=None, so when documents
+            # change we must supply embeddings in the same call or it errors.
+            if embedding is None:
+                raise ValueError(
+                    "update_code: embedding is required when description changes"
+                )
+            kwargs["documents"] = [description]
+            kwargs["embeddings"] = [embedding.astype(np.float32).tolist()]
+        elif embedding is not None:
+            kwargs["embeddings"] = [embedding.astype(np.float32).tolist()]
+        self._collection.update(**kwargs)
 
     def update_embedding(self, name: str, embedding: np.ndarray) -> None:
         if self.get(name) is None:
@@ -272,6 +292,7 @@ class ChromaSkillRepository:
             "success_count": int(s.success_count),
             "fail_count": int(s.fail_count),
             "reflected_count": int(s.reflected_count),
+            "fix_count": int(s.fix_count),
             "episodic_score": float(s.episodic_score),
             "created_at": s.created_at.isoformat(),
         }
@@ -285,6 +306,7 @@ class ChromaSkillRepository:
             success_count=int(meta.get("success_count", 0)),
             fail_count=int(meta.get("fail_count", 0)),
             reflected_count=int(meta.get("reflected_count", 0)),
+            fix_count=int(meta.get("fix_count", 0)),
             episodic_score=float(meta.get("episodic_score", 0.0)),
             created_at=datetime.fromisoformat(meta["created_at"]),
         )
