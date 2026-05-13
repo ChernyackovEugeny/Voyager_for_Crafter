@@ -13,6 +13,8 @@ class SkillSource:
     llm_call: object | None = None
     llm_call_type: str = "codegen"
     llm_calls: tuple[tuple[str, object], ...] = ()
+    extra_skills: tuple[tuple[str, str], ...] = ()
+    allowed_skill_names: frozenset[str] = frozenset()
 
 
 class AgentStrategy:
@@ -57,7 +59,7 @@ class AgentStrategy:
         """React to execution that did not complete the task."""
         raise NotImplementedError
 
-    def retrieval_route(self, candidates) -> str:
+    def retrieval_route(self, candidates, task=None) -> str:
         """Human-readable decision label for Agent logs."""
         raise NotImplementedError
 

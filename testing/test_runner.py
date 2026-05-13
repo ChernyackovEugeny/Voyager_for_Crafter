@@ -90,14 +90,46 @@ class TestSkillLoader(unittest.TestCase):
         self.assertEqual(name, "navigate")
         self.assertTrue(callable(func))
 
-    def test_yield_from_explore_for_allowed(self):
+    def test_explore_for_rejected_as_unknown_helper(self):
         src = (
             "def explore(state):\n"
             "    coords, state = yield from explore_for('water', state)\n"
         )
-        name, func = load_skill(src)
-        self.assertEqual(name, "explore")
-        self.assertTrue(callable(func))
+        with self.assertRaises(SkillLoadError) as ctx:
+            load_skill(src)
+        self.assertIn("explore_for", str(ctx.exception))
+
+    def test_unknown_helper_rejected(self):
+        src = (
+            "def collect_wood(state):\n"
+            "    state = yield from chop_tree(state)\n"
+        )
+        with self.assertRaises(SkillLoadError) as ctx:
+            load_skill(src)
+        self.assertIn("chop_tree", str(ctx.exception))
+
+    def test_primitive_wrong_arity_rejected(self):
+        memory = SpatialMemory()
+        src = (
+            "def remember(state):\n"
+            "    coords = get_memory('water')\n"
+            "    yield 0\n"
+        )
+        with self.assertRaises(SkillLoadError) as ctx:
+            load_skill(src, SkillRuntime(memory=memory))
+        self.assertIn("get_memory", str(ctx.exception))
+
+    def test_nested_helper_function_rejected(self):
+        src = (
+            "def collect_drink(state):\n"
+            "    def find_water(state):\n"
+            "        return find_nearest('water', state)\n"
+            "    coords = find_water(state)\n"
+            "    yield 0\n"
+        )
+        with self.assertRaises(SkillLoadError) as ctx:
+            load_skill(src)
+        self.assertIn("nested helper", str(ctx.exception))
 
     def test_memory_primitives_require_runtime(self):
         src = (
@@ -156,6 +188,20 @@ class TestSkillLoader(unittest.TestCase):
         gen = func({})
         self.assertEqual(next(gen), 5)
 
+    def test_extra_skill_is_callable_by_repository_alias(self):
+        helper = (
+            "def scout_area(state):\n"
+            "    state = yield 5\n"
+            "    return state\n"
+        )
+        main = (
+            "def collect_drink(state):\n"
+            "    state = yield from scout_safely(state)\n"
+        )
+        _, func = load_skill(main, extra_skills=[("scout_safely", helper)])
+        gen = func({})
+        self.assertEqual(next(gen), 5)
+
     def test_invalid_extra_skill_does_not_block_main(self):
         bad = "def broken(:\n    pass\n"
         main = (
@@ -165,6 +211,82 @@ class TestSkillLoader(unittest.TestCase):
         _, func = load_skill(main, extra_skills=[("broken", bad)])
         gen = func({})
         self.assertEqual(next(gen), 0)
+
+    def test_invalid_referenced_extra_skill_blocks_main(self):
+        bad = "def scout_safely(:\n    pass\n"
+        main = (
+            "def collect_drink(state):\n"
+            "    state = yield from scout_safely(state)\n"
+        )
+        with self.assertRaises(SkillLoadError) as ctx:
+            load_skill(main, extra_skills=[("scout_safely", bad)])
+        self.assertIn("required extra skill failed", str(ctx.exception))
+
+    def test_function_must_accept_state_argument(self):
+        with self.assertRaises(SkillLoadError) as ctx:
+            load_skill("def bad(current):\n    yield 0\n")
+        self.assertIn("argument named 'state'", str(ctx.exception))
+
+    def test_function_must_be_generator(self):
+        with self.assertRaises(SkillLoadError) as ctx:
+            load_skill("def bad(state):\n    return 0\n")
+        self.assertIn("generator", str(ctx.exception))
+
+    def test_optional_find_nearest_must_be_guarded_before_go_to(self):
+        src = (
+            "def bad_water(state):\n"
+            "    coords = find_nearest('water', state)\n"
+            "    state = yield from go_to(coords, state)\n"
+        )
+        with self.assertRaises(SkillLoadError) as ctx:
+            load_skill(src)
+        self.assertIn("optional value 'coords'", str(ctx.exception))
+
+    def test_optional_get_home_guard_allows_go_to(self):
+        src = (
+            "def go_home(state):\n"
+            "    home = get_home()\n"
+            "    if home is not None:\n"
+            "        state = yield from go_to(home, state)\n"
+            "    yield noop()\n"
+        )
+        _, func = load_skill(src, SkillRuntime(memory=SpatialMemory()))
+        self.assertTrue(callable(func))
+
+    def test_optional_get_memory_value_must_be_guarded_before_indexing(self):
+        src = (
+            "def bad_memory(state):\n"
+            "    coords = get_memory().get('water')\n"
+            "    x = coords[0]\n"
+            "    yield noop()\n"
+        )
+        with self.assertRaises(SkillLoadError) as ctx:
+            load_skill(src, SkillRuntime(memory=SpatialMemory()))
+        self.assertIn("optional value 'coords'", str(ctx.exception))
+
+    def test_none_guard_else_branch_allows_optional_coord(self):
+        src = (
+            "def guarded_water(state):\n"
+            "    coords = get_memory().get('water')\n"
+            "    if coords is None:\n"
+            "        yield noop()\n"
+            "    else:\n"
+            "        state = yield from go_to(coords, state)\n"
+        )
+        _, func = load_skill(src, SkillRuntime(memory=SpatialMemory()))
+        self.assertTrue(callable(func))
+
+    def test_none_guard_in_and_condition_allows_optional_coord(self):
+        src = (
+            "def guarded_grass(state):\n"
+            "    current_pos = get_position(state)\n"
+            "    grass_coords = find_nearest('grass', state)\n"
+            "    if grass_coords is not None and grass_coords != current_pos:\n"
+            "        state = yield from go_to(grass_coords, state)\n"
+            "    yield noop()\n"
+        )
+        _, func = load_skill(src)
+        self.assertTrue(callable(func))
 
 
 if __name__ == "__main__":

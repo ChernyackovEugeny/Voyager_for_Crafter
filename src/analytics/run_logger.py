@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS task_attempts (
     inventory           JSONB NOT NULL DEFAULT '{}'::jsonb,
     achievements        JSONB NOT NULL DEFAULT '{}'::jsonb,
     state_text          TEXT,
+    error_traceback     TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -140,6 +141,7 @@ ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS generated_code TEXT;
 ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS raw_response TEXT;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'running';
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS run_metadata JSONB;
+ALTER TABLE task_attempts ADD COLUMN IF NOT EXISTS error_traceback TEXT;
 """
 
 
@@ -322,6 +324,7 @@ class RunLogger:
         inventory: dict | None = None,
         achievements: dict | None = None,
         state_text: str | None = None,
+        error_traceback: str | None = None,
     ) -> None:
         if self._disabled:
             return
@@ -334,8 +337,9 @@ class RunLogger:
                          task_description, achievement_key, skill_name,
                          reused_skill, generated, executor_reason,
                          failure_reason, task_complete, steps, total_reward,
-                         achievements_gained, inventory, achievements, state_text)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         achievements_gained, inventory, achievements, state_text,
+                         error_traceback)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         _uuid(), self.session_id, episode_num, task_name,
@@ -347,6 +351,7 @@ class RunLogger:
                         json.dumps(inventory or {}),
                         json.dumps(achievements or {}),
                         state_text,
+                        error_traceback,
                     ),
                 )
         except Exception as exc:

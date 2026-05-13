@@ -57,14 +57,17 @@ class Agent:
         episode_reward = 0.0
         skipped_task_keys: set[str] = set()
         consecutive_failures: dict[str, int] = {}
+        all_tasks_done = False
 
         while not done and iterations < self.max_iterations_per_episode:
             task = self.curriculum.propose_task(
                 state["info"],
                 skip=skipped_task_keys,
             )
+            self._log_pending_curriculum_llm_calls()
             if task is None:
                 logger.info("[Agent] episode stopped: no available tasks")
+                all_tasks_done = True
                 break
 
             self.current_task = task
@@ -126,7 +129,7 @@ class Agent:
             "iterations": iterations,
             "final_state": state,
             "episode_done": done,
-            "all_tasks_done": self.curriculum.propose_task(state["info"]) is None,
+            "all_tasks_done": all_tasks_done,
             "skipped_tasks": sorted(skipped_task_keys),
             "steps": episode_steps,
             "total_reward": episode_reward,
@@ -141,7 +144,7 @@ class Agent:
         """Run one task attempt and return (episode_done, final_state, skipped)."""
         candidates = self.skill_manager.retrieve(task.description)
         self._last_result = None
-        self._log_retrieval(candidates)
+        self._log_retrieval(candidates, task)
         source = self.strategy.acquire_skill(
             task=task,
             obs=state["obs"],
@@ -159,13 +162,14 @@ class Agent:
         self._log_source_llm_call(source)
 
         try:
+            extra_skills = source.extra_skills or tuple(
+                (candidate.skill.name, candidate.skill.code)
+                for candidate in candidates
+            )
             function_name, skill_func = load_skill(
                 source.code,
                 runtime=SkillRuntime(memory=self.memory),
-                extra_skills=[
-                    (candidate.skill.name, candidate.skill.code)
-                    for candidate in candidates
-                ],
+                extra_skills=list(extra_skills),
             )
         except SkillLoadError as exc:
             logger.warning("[Agent] load failed: %s | %s", task.name, exc)
@@ -179,7 +183,7 @@ class Agent:
                 skill_manager=self.skill_manager,
                 curriculum=self.curriculum,
             )
-            self._log_llm_call(call, call_type="reflection")
+            self._log_strategy_call(call, default_call_type="reflection")
             return False, state, False
 
         self.current_skill = source.reused_name or function_name
@@ -211,6 +215,9 @@ class Agent:
             task_complete = False
 
         if task_complete:
+            completed = getattr(self.curriculum, "record_task_completed", None)
+            if completed is not None:
+                completed(task, final_state)
             self.strategy.on_task_completed(
                 task=task,
                 source=source,
@@ -233,7 +240,7 @@ class Agent:
                 skill_manager=self.skill_manager,
                 curriculum=self.curriculum,
             )
-            self._log_llm_call(call, call_type="reflection")
+            self._log_strategy_call(call, default_call_type="reflection")
 
         self._log_task_attempt(
             task=task,
@@ -252,7 +259,7 @@ class Agent:
         self.executor.render_state(self.env)
         return {"obs": obs, "info": info}, bool(terminated or truncated)
 
-    def _log_retrieval(self, candidates) -> None:
+    def _log_retrieval(self, candidates, task=None) -> None:
         if not candidates:
             logger.info("[Agent] retrieve: 0 candidates")
             return
@@ -262,7 +269,7 @@ class Agent:
             best.skill.name,
             best.similarity,
             self.strategy.reuse_threshold,
-            self.strategy.retrieval_route(candidates),
+            self.strategy.retrieval_route(candidates, task=task),
         )
 
     @staticmethod
@@ -302,6 +309,13 @@ class Agent:
         for call_type, call in drain():
             self._log_llm_call(call, call_type=call_type)
 
+    def _log_pending_curriculum_llm_calls(self) -> None:
+        drain = getattr(self.curriculum, "drain_pending_llm_calls", None)
+        if drain is None:
+            return
+        for call_type, call in drain():
+            self._log_llm_call(call, call_type=call_type)
+
     def _log_llm_call(self, call, *, call_type: str) -> None:
         if call is None:
             return
@@ -323,6 +337,20 @@ class Agent:
             generated_code=getattr(call, "code", None),
             raw_response=getattr(call, "raw_response", None),
         )
+
+    def _log_strategy_call(
+        self,
+        call,
+        *,
+        default_call_type: str,
+    ) -> None:
+        if call is None:
+            return
+        if isinstance(call, tuple) and len(call) == 2:
+            call_type, payload = call
+            self._log_llm_call(payload, call_type=str(call_type))
+            return
+        self._log_llm_call(call, call_type=default_call_type)
 
     def _log_task_attempt(
         self,
@@ -358,6 +386,7 @@ class Agent:
             inventory=info.get("inventory", {}),
             achievements=info.get("achievements", {}),
             state_text=caption(final_state.get("obs"), info),
+            error_traceback=result.error,
         )
 
     @staticmethod

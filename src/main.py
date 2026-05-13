@@ -71,6 +71,7 @@ import argparse
 import logging
 
 from agent.agent import Agent
+from agent.bootstrap import bootstrap_initial_skills
 from agent.executor import Executor
 from agent.memory import SpatialMemory
 from agent.strategies.inference import InferenceStrategy
@@ -80,7 +81,7 @@ from analytics.run_logger import RunLogger
 from config import get_settings
 from environment.wrapper import CrafterEnv
 from llm.codegen import CodeGen
-from llm.curriculum import HardcodedCurriculum, SurvivalSettings
+from llm.curriculum import HardcodedCurriculum, LLMCurriculum, SurvivalSettings
 from llm.fix_bug import FixBug
 from llm.reflection import Reflection
 from observability.logging_config import configure_logging
@@ -182,6 +183,9 @@ def main(argv: list[str] | None = None) -> None:
         max_steps_per_skill=settings.executor.max_steps_per_skill,
         health_threshold=settings.executor.health_interrupt_threshold,
         stagnation_window=settings.executor.stagnation_window,
+        min_steps_before_stagnation_interrupt=(
+            settings.executor.min_steps_before_stagnation_interrupt
+        ),
         min_steps_before_health_interrupt=(
             settings.executor.min_steps_before_health_interrupt
         ),
@@ -221,9 +225,23 @@ def main(argv: list[str] | None = None) -> None:
             )
         memory = SpatialMemory()
         if args.mode == "train":
+            codegen = CodeGen()
+            bug_fixer = FixBug()
+            skill_validator = lambda code, allowed_skill_names=(), extra_skills=(): load_skill(
+                code,
+                runtime=SkillRuntime(memory=memory),
+                extra_skills=list(extra_skills),
+                allowed_skill_names=set(allowed_skill_names),
+            )
+            bootstrap_initial_skills(
+                skill_manager=skill_manager,
+                codegen=codegen,
+                skill_validator=skill_validator,
+                run_logger=run_log,
+            )
             strategy = TrainingStrategy(
-                codegen=CodeGen(),
-                bug_fixer=FixBug(),
+                codegen=codegen,
+                bug_fixer=bug_fixer,
                 reuse_threshold=settings.embedding.similarity_reuse_threshold,
                 reflection=Reflection() if settings.llm.reflection_enabled else None,
                 reflection_enabled=settings.llm.reflection_enabled,
@@ -231,31 +249,39 @@ def main(argv: list[str] | None = None) -> None:
                     settings.llm.max_reflections_per_skill
                 ),
                 max_fix_attempts=settings.llm.max_fix_attempts,
-                skill_validator=lambda code: load_skill(
-                    code,
-                    runtime=SkillRuntime(memory=memory),
-                ),
+                skill_validator=skill_validator,
                 min_reflection_steps=settings.executor.min_reflection_steps,
             )
         else:
             strategy = InferenceStrategy(
                 reuse_threshold=settings.embedding.similarity_reuse_threshold,
             )
+        survival_settings = SurvivalSettings(
+            enter_health=settings.survival.enter_health,
+            enter_food=settings.survival.enter_food,
+            enter_drink=settings.survival.enter_drink,
+            exit_health=settings.survival.exit_health,
+            exit_food=settings.survival.exit_food,
+            exit_drink=settings.survival.exit_drink,
+            max_consecutive_failures=(
+                settings.survival.max_consecutive_failures
+            ),
+        )
+        hardcoded_curriculum = HardcodedCurriculum(survival=survival_settings)
+        if args.mode == "train" and settings.llm.curriculum_llm_enabled:
+            curriculum = LLMCurriculum(
+                survival=survival_settings,
+                max_failures_in_context=(
+                    settings.llm.curriculum_max_failures_in_context
+                ),
+                max_retries=settings.llm.curriculum_max_retries,
+                fallback=hardcoded_curriculum,
+            )
+        else:
+            curriculum = hardcoded_curriculum
         agent = Agent(
             env=env,
-            curriculum=HardcodedCurriculum(
-                survival=SurvivalSettings(
-                    enter_health=settings.survival.enter_health,
-                    enter_food=settings.survival.enter_food,
-                    enter_drink=settings.survival.enter_drink,
-                    exit_health=settings.survival.exit_health,
-                    exit_food=settings.survival.exit_food,
-                    exit_drink=settings.survival.exit_drink,
-                    max_consecutive_failures=(
-                        settings.survival.max_consecutive_failures
-                    ),
-                )
-            ),
+            curriculum=curriculum,
             skill_manager=skill_manager,
             strategy=strategy,
             executor=executor,

@@ -46,6 +46,7 @@ class TrainingStrategy(AgentStrategy):
         self._min_reflection_steps = min_reflection_steps
         self._pending_llm_calls: list[tuple[str, object]] = []
         self._last_codegen_failure: dict[str, tuple[str, str]] = {}
+        self._pending_fixed_sources: dict[str, SkillSource] = {}
 
     def acquire_skill(
         self,
@@ -56,13 +57,27 @@ class TrainingStrategy(AgentStrategy):
         candidates,
     ):
         self._pending_llm_calls = []
-        selected = self._select_reusable_skill(candidates)
+        pending_fixed = self._pending_fixed_sources.pop(task.name, None)
+        if pending_fixed is not None:
+            logger.info("[Agent] retry fixed generated skill for %s", task.name)
+            return pending_fixed
+
+        extra_skills = tuple(
+            (candidate.skill.name, candidate.skill.code)
+            for candidate in candidates
+        )
+        allowed_skill_names = frozenset(
+            candidate.skill.name for candidate in candidates
+        )
+        selected = self._select_reusable_skill(task, candidates)
         if selected is not None:
             logger.info("[Agent] reuse: %s", selected.skill.name)
             return SkillSource(
                 code=selected.skill.code,
                 reused_name=selected.skill.name,
                 generated=False,
+                extra_skills=extra_skills,
+                allowed_skill_names=allowed_skill_names,
             )
 
         logger.info("[Agent] codegen: generating new skill for %s", task.name)
@@ -83,6 +98,8 @@ class TrainingStrategy(AgentStrategy):
             task=task,
             state_text=state_text,
             llm_calls=[("codegen", call)],
+            allowed_skill_names=allowed_skill_names,
+            extra_skills=extra_skills,
         )
 
     def on_skill_unavailable(self, *, task, state: dict, curriculum) -> None:
@@ -118,6 +135,14 @@ class TrainingStrategy(AgentStrategy):
         if source.reused_name is not None:
             logger.info("[Agent] metric: record_failure(%s)", source.reused_name)
             skill_manager.record_failure(source.reused_name)
+            fixed = self._fix_reused_technical_error(
+                task=task,
+                source=source,
+                state=state,
+                skill_manager=skill_manager,
+            )
+            if fixed is not None:
+                return fixed
             return self._reflect_reused_skill(
                 task=task,
                 source=source,
@@ -126,17 +151,19 @@ class TrainingStrategy(AgentStrategy):
             )
 
         logger.info("[Agent] discard: generated skill was not successful")
-        logger.info("[Agent] failed generated skill code:\n%s", source.code)
-        self._last_codegen_failure[task.name] = (
-            source.code,
-            str(state.get("failure_reason") or "unknown"),
+        logger.debug("[Agent] failed generated skill code:\n%s", source.code)
+        fixed = self._fix_generated_technical_error(
+            task=task,
+            source=source,
+            state=state,
         )
+        if fixed is not None:
+            return fixed
+        self._last_codegen_failure[task.name] = self._failure_memory(source, state)
         return None
 
-    def retrieval_route(self, candidates) -> str:
-        if not candidates:
-            return "codegen"
-        if candidates[0].similarity >= self._reuse_threshold:
+    def retrieval_route(self, candidates, task=None) -> str:
+        if self._select_reusable_skill(task, candidates) is not None:
             return "reuse"
         return "codegen"
 
@@ -144,16 +171,23 @@ class TrainingStrategy(AgentStrategy):
     def reuse_threshold(self) -> float:
         return self._reuse_threshold
 
-    def _select_reusable_skill(self, candidates):
-        if not candidates:
-            return None
-        best = candidates[0]
-        if best.similarity >= self._reuse_threshold:
-            return best
+    def _select_reusable_skill(self, task, candidates):
+        for candidate in candidates:
+            if candidate.similarity < self._reuse_threshold:
+                continue
+            if not _candidate_matches_task(task, candidate):
+                logger.info(
+                    "[Agent] reuse rejected: %s incompatible with task %s",
+                    candidate.skill.name,
+                    getattr(task, "name", None),
+                )
+                continue
+            return candidate
         return None
 
     def _save_new_skill(self, task, code: str, skill_manager) -> None:
-        name = self._unique_skill_name(task.name.replace("-", "_"), skill_manager)
+        base = getattr(task, "achievement_key", None) or task.name.replace("-", "_")
+        name = self._unique_skill_name(base, skill_manager)
         result = skill_manager.save(name=name, code=code, task=task.description)
         if result.outcome == "ok":
             logger.info("[Agent] save: %s | outcome=ok", name)
@@ -176,6 +210,8 @@ class TrainingStrategy(AgentStrategy):
         task,
         state_text: str,
         llm_calls: list[tuple[str, object]],
+        allowed_skill_names: set[str] | None = None,
+        extra_skills: tuple[tuple[str, str], ...] = (),
     ):
         if self._skill_validator is None:
             call_type, call = llm_calls[-1]
@@ -185,11 +221,17 @@ class TrainingStrategy(AgentStrategy):
                 llm_call=call,
                 llm_call_type=call_type,
                 llm_calls=tuple(llm_calls),
+                extra_skills=extra_skills,
+                allowed_skill_names=frozenset(allowed_skill_names or ()),
             )
 
         for attempt in range(self._max_fix_attempts + 1):
             try:
-                self._skill_validator(code)
+                self._validate_skill(
+                    code,
+                    allowed_skill_names=allowed_skill_names or set(),
+                    extra_skills=extra_skills,
+                )
                 if attempt > 0:
                     logger.info(
                         "[Agent] fix_bug: succeeded after %d attempt(s)",
@@ -202,6 +244,8 @@ class TrainingStrategy(AgentStrategy):
                     llm_call=call,
                     llm_call_type=call_type,
                     llm_calls=tuple(llm_calls),
+                    extra_skills=extra_skills,
+                    allowed_skill_names=frozenset(allowed_skill_names or ()),
                 )
             except Exception as exc:
                 if attempt >= self._max_fix_attempts:
@@ -254,6 +298,128 @@ class TrainingStrategy(AgentStrategy):
 
         return None
 
+    def _validate_skill(
+        self,
+        code: str,
+        *,
+        allowed_skill_names: set[str] | frozenset[str],
+        extra_skills: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        if self._skill_validator is None:
+            return
+        try:
+            self._skill_validator(
+                code,
+                allowed_skill_names=allowed_skill_names,
+                extra_skills=extra_skills,
+            )
+        except TypeError:
+            try:
+                self._skill_validator(code, allowed_skill_names=allowed_skill_names)
+            except TypeError:
+                self._skill_validator(code)
+
+    def _fix_generated_technical_error(self, *, task, source, state):
+        if not self._is_technical_error(state):
+            return None
+        fixed_call = self._call_bug_fixer(task=task, source=source, state=state)
+        if fixed_call is None:
+            self._last_codegen_failure[task.name] = self._failure_memory(source, state)
+            return None
+        try:
+            self._validate_skill(
+                fixed_call.code,
+                allowed_skill_names=self._source_allowed_names(source),
+                extra_skills=self._source_extra_skills(source),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[Agent] runtime fix rejected for %s: %s",
+                task.name,
+                exc,
+            )
+            self._last_codegen_failure[task.name] = (
+                fixed_call.code,
+                f"runtime fix rejected: {exc}",
+            )
+            return ("fix_bug", fixed_call)
+
+        self._pending_fixed_sources[task.name] = SkillSource(
+            code=fixed_call.code,
+            generated=True,
+            extra_skills=self._source_extra_skills(source),
+            allowed_skill_names=self._source_allowed_names(source),
+        )
+        self._last_codegen_failure.pop(task.name, None)
+        logger.info("[Agent] runtime fix queued for retry: %s", task.name)
+        return ("fix_bug", fixed_call)
+
+    def _fix_reused_technical_error(self, *, task, source, state, skill_manager):
+        if not self._is_technical_error(state):
+            return None
+        fixed_call = self._call_bug_fixer(task=task, source=source, state=state)
+        if fixed_call is None:
+            return None
+        try:
+            self._validate_skill(
+                fixed_call.code,
+                allowed_skill_names=self._source_allowed_names(source),
+                extra_skills=self._source_extra_skills(source),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[Agent] reused skill fix rejected for %s: %s",
+                source.reused_name,
+                exc,
+            )
+            return ("fix_bug", fixed_call)
+        skill_manager.update_code(source.reused_name, fixed_call.code)
+        logger.info("[Agent] runtime fix: updated %s", source.reused_name)
+        return ("fix_bug", fixed_call)
+
+    def _call_bug_fixer(self, *, task, source, state):
+        if self._bug_fixer is None:
+            logger.info("[Agent] runtime fix skipped: no bug_fixer configured")
+            return None
+        try:
+            return self._bug_fixer.fix(
+                skill_code=source.code,
+                error_traceback=str(state.get("error_traceback") or ""),
+                state_text=self._state_text(state),
+                task=task.description,
+            )
+        except Exception as exc:
+            logger.warning("[Agent] runtime fix failed for %s: %s", task.name, exc)
+            return None
+
+    @staticmethod
+    def _is_technical_error(state: dict) -> bool:
+        return str(state.get("failure_reason") or "") in {"error", "load_error"}
+
+    @staticmethod
+    def _failure_memory(source: SkillSource, state: dict) -> tuple[str, str]:
+        reason = str(state.get("failure_reason") or "unknown")
+        traceback = state.get("error_traceback")
+        if traceback:
+            first_line = str(traceback).splitlines()[0]
+            reason = f"{reason}: {first_line}"
+        return source.code, reason
+
+    @staticmethod
+    def _state_text(state: dict) -> str:
+        info = state.get("info", {}) or {}
+        try:
+            return caption(state.get("obs"), info)
+        except Exception:
+            inventory = info.get("inventory", {}) or {}
+            achievements = info.get("achievements", {}) or {}
+            unlocked = sorted(key for key, value in achievements.items() if value)
+            return (
+                f"Observation: unavailable\n"
+                f"Inventory: {inventory}\n"
+                f"Achievements: {unlocked}"
+            )
+
     def _reflect_reused_skill(self, *, task, source, state, skill_manager):
         if not self._reflection_enabled or self._reflection is None:
             return None
@@ -287,6 +453,12 @@ class TrainingStrategy(AgentStrategy):
             )
             return None
         steps = int(state.get("executor_steps", 0) or 0)
+        if steps <= 0:
+            logger.info(
+                "[Agent] reflection skipped: no execution steps for %s",
+                skill.name,
+            )
+            return None
         if steps < self._min_reflection_steps and failure_reason != "task_incomplete":
             logger.info(
                 "[Agent] reflection skipped: only %d step(s) before interrupt",
@@ -308,6 +480,20 @@ class TrainingStrategy(AgentStrategy):
         except Exception as exc:
             logger.warning("[Agent] reflection failed for %s: %s", skill.name, exc)
             return None
+
+        try:
+            self._validate_skill(
+                call.code,
+                allowed_skill_names=self._source_allowed_names(source),
+                extra_skills=self._source_extra_skills(source),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[Agent] reflection rejected for %s: %s",
+                skill.name,
+                exc,
+            )
+            return call
 
         skill_manager.update_code(skill.name, call.code)
         logger.info("[Agent] reflection: updated %s", skill.name)
@@ -355,6 +541,14 @@ class TrainingStrategy(AgentStrategy):
         return False
 
     @staticmethod
+    def _source_allowed_names(source) -> frozenset[str]:
+        return frozenset(getattr(source, "allowed_skill_names", frozenset()))
+
+    @staticmethod
+    def _source_extra_skills(source) -> tuple[tuple[str, str], ...]:
+        return tuple(getattr(source, "extra_skills", ()))
+
+    @staticmethod
     def _unique_skill_name(base: str, skill_manager) -> str:
         if not skill_manager.exists(base):
             return base
@@ -374,3 +568,36 @@ class TrainingStrategy(AgentStrategy):
             }
             for candidate in candidates
         ]
+
+
+def _candidate_matches_task(task, candidate) -> bool:
+    if task is None:
+        return True
+
+    skill_name = candidate.skill.name
+    achievement_key = getattr(task, "achievement_key", None)
+    if achievement_key is not None:
+        return skill_name == achievement_key or skill_name.startswith(
+            f"{achievement_key}_v"
+        )
+
+    task_name = getattr(task, "name", "")
+    if task_name == "survive":
+        return (
+            skill_name == "survive"
+            or skill_name.startswith("survive_v")
+            or skill_name in _SURVIVAL_SKILL_NAMES
+            or any(skill_name.startswith(f"{name}_v") for name in _SURVIVAL_SKILL_NAMES)
+        )
+
+    return True
+
+
+_SURVIVAL_SKILL_NAMES = {
+    "collect_drink",
+    "eat_cow",
+    "secure_water",
+    "secure_food",
+    "build_shelter",
+    "survival_routine",
+}

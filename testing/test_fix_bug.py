@@ -60,7 +60,10 @@ class FixBugTests(unittest.TestCase):
         self.assertEqual(request["model"], "deepseek-chat")
         self.assertEqual(request["temperature"], 0.0)
         self.assertIs(request["messages"][0]["content"], FIX_BUG_SYSTEM_PROMPT)
-        self.assertIn("Validation Error", request["messages"][1]["content"])
+        self.assertIn(
+            "Validation Or Runtime Error",
+            request["messages"][1]["content"],
+        )
 
     def test_extract_code_falls_back_to_raw_response(self):
         client = StubClient("def f(state):\n    yield 0")

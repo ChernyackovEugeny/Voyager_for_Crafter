@@ -145,6 +145,7 @@ def log_task_attempt(
     inventory: dict | None = None,
     achievements: dict | None = None,
     state_text: str | None = None,
+    error_traceback: str | None = None,
 ) -> None:
     """Record one executed task/skill attempt."""
     if run_log is None:
@@ -169,6 +170,7 @@ def log_task_attempt(
         inventory=inventory,
         achievements=achievements,
         state_text=state_text,
+        error_traceback=error_traceback,
     )
 
 

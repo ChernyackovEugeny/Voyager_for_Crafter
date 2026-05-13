@@ -47,6 +47,7 @@ class Executor:
         render_delay_s: float = 0.05,
         render_viewer=None,
         stagnation_window: int = 0,
+        min_steps_before_stagnation_interrupt: int = 0,
         min_steps_before_health_interrupt: int = 0,
     ) -> None:
         self._max_steps = max_steps_per_skill
@@ -57,6 +58,9 @@ class Executor:
         self._render_viewer = render_viewer
         self._render_warning_logged = False
         self._stagnation_window = stagnation_window
+        self._min_steps_before_stagnation_interrupt = (
+            min_steps_before_stagnation_interrupt
+        )
         self._min_steps_before_health_interrupt = min_steps_before_health_interrupt
 
     def run(
@@ -137,6 +141,7 @@ class Executor:
                 last_progress = progress
                 if (
                     self._stagnation_window > 0
+                    and steps >= self._min_steps_before_stagnation_interrupt
                     and stagnant_steps >= self._stagnation_window
                 ):
                     logger.info("executor: stagnation interrupt at step %d", steps)
@@ -172,7 +177,7 @@ class Executor:
             )
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}\n{tb_mod.format_exc()}"
-            logger.warning("executor: skill error: %s", exc)
+            logger.warning("executor: skill error: %s", err)
             return ExecutionResult(
                 reason=InterruptReason.ERROR,
                 steps=steps,

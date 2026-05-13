@@ -29,7 +29,14 @@ class SkillManager:
         self._embedder = embedder
         self._cfg = config
 
-    def save(self, *, name: str, code: str, task: str) -> SaveResult:
+    def save(
+        self,
+        *,
+        name: str,
+        code: str,
+        task: str,
+        deduplicate: bool = True,
+    ) -> SaveResult:
         """Try to save a generated skill, rejecting duplicates."""
         if self._repo.get(name) is not None:
             logger.info("SkillManager.save: name %r already taken", name)
@@ -39,7 +46,11 @@ class SkillManager:
         embedding = self._embedder.encode(task)
 
         dup_name, dup_sim = self._most_similar_existing(embedding)
-        if dup_name is not None and dup_sim > self._cfg.similarity_dedup_threshold:
+        if (
+            deduplicate
+            and dup_name is not None
+            and dup_sim > self._cfg.similarity_dedup_threshold
+        ):
             logger.info(
                 "SkillManager.save: %r rejected as duplicate of %r (sim=%.3f)",
                 name,
@@ -81,6 +92,16 @@ class SkillManager:
     def get(self, name: str) -> SkillRecord | None:
         """Return a stored skill record by name."""
         return self._repo.get(name)
+
+    def count(self) -> int:
+        """Return number of stored skills when the repository supports it."""
+        count = getattr(self._repo, "count", None)
+        if count is None:
+            skills = getattr(self._repo, "list_skills", None)
+            if skills is None:
+                return 0
+            return len(skills())
+        return int(count())
 
     def update_code(self, name: str, new_code: str) -> None:
         """Replace stored skill code while preserving description and embedding."""

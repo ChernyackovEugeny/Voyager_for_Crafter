@@ -44,8 +44,13 @@ class LLMConfig(_BaseGroup):
     curriculum_model: str = "deepseek-chat"
     codegen_temperature: float = 0.0
     reflection_temperature: float = 0.1
+    curriculum_temperature: float = 0.2
     reflection_timeout_s: float = 180.0
     reflection_enabled: bool = True
+    curriculum_llm_enabled: bool = False
+    curriculum_timeout_s: float = 30.0
+    curriculum_max_failures_in_context: int = 5
+    curriculum_max_retries: int = 1
     max_reflections_per_skill: int = 3
     max_fix_attempts: int = 3
     request_timeout_s: float = 60.0
@@ -106,7 +111,11 @@ class EmbeddingConfig(_BaseGroup):
 
     model_name: str = "all-MiniLM-L6-v2"
     top_k: int = 5
-    similarity_reuse_threshold: float = 0.85
+    # Invariant: reuse_threshold <= dedup_threshold.
+    # Otherwise there's a dead zone where a retrieved skill is too dissimilar to
+    # reuse but similar enough that the freshly generated replacement is
+    # rejected as a duplicate — codegen runs every task and nothing is learned.
+    similarity_reuse_threshold: float = 0.65
     similarity_dedup_threshold: float = 0.70
 
 
@@ -124,7 +133,8 @@ class ExecutorConfig(_BaseGroup):
     max_iterations_per_episode: int = 50
     health_interrupt_threshold: int = 4
     min_steps_before_health_interrupt: int = 5
-    stagnation_window: int = 15
+    stagnation_window: int = 40
+    min_steps_before_stagnation_interrupt: int = 20
     max_consecutive_task_failures: int = 3
     min_reflection_steps: int = 3
 

@@ -32,6 +32,8 @@ class FakeCurriculum:
         self.tasks = list(tasks)
         self.failures = []
         self.calls = []
+        self.pending_llm_calls = []
+        self.completed = []
 
     def propose_task(self, info, *, skip=None):
         skip = skip or set()
@@ -48,6 +50,14 @@ class FakeCurriculum:
 
     def record_task_failed(self, task, state_snapshot):
         self.failures.append((task, state_snapshot))
+
+    def record_task_completed(self, task, state_snapshot=None):
+        self.completed.append((task, state_snapshot))
+
+    def drain_pending_llm_calls(self):
+        calls = tuple(self.pending_llm_calls)
+        self.pending_llm_calls = []
+        return calls
 
 
 class FakeSkillManager:
@@ -95,7 +105,7 @@ class FakeStrategy:
         self.failed.append((task.name, source.reused_name))
         curriculum.record_task_failed(task, state)
 
-    def retrieval_route(self, candidates):
+    def retrieval_route(self, candidates, task=None):
         return "test"
 
     @property
@@ -124,7 +134,13 @@ class FakeExecutor:
         danger_interrupt_enabled=False,
         survival_progress_enabled=False,
     ):
-        self.calls.append((skill, initial_state))
+        self.calls.append({
+            "skill": skill,
+            "initial_state": initial_state,
+            "health_interrupt_enabled": health_interrupt_enabled,
+            "danger_interrupt_enabled": danger_interrupt_enabled,
+            "survival_progress_enabled": survival_progress_enabled,
+        })
         achievements = {"collect_wood": 1 if self.complete else 0}
         return ExecutionResult(
             reason=self.reason,
@@ -303,6 +319,29 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(run_logger.llm_calls[0]["episode_num"], 7)
         self.assertEqual(run_logger.llm_calls[0]["model"], "deepseek-v4-flash")
 
+    def test_agent_logs_curriculum_llm_call_after_proposal(self):
+        run_logger = FakeRunLogger()
+        curriculum = FakeCurriculum([_task()])
+        curriculum.pending_llm_calls.append(("curriculum", _llm_call()))
+        agent = _agent(
+            curriculum=curriculum,
+            executor=FakeExecutor(complete=True),
+            run_logger=run_logger,
+        )
+
+        agent.run(episode_num=7)
+
+        self.assertEqual(run_logger.llm_calls[0]["call_type"], "curriculum")
+        self.assertEqual(run_logger.llm_calls[0]["episode_num"], 7)
+
+    def test_agent_records_task_completed_on_curriculum(self):
+        curriculum = FakeCurriculum([_task()])
+        agent = _agent(curriculum=curriculum, executor=FakeExecutor(complete=True))
+
+        agent.run()
+
+        self.assertEqual(curriculum.completed[0][0].name, "collect-wood")
+
     def test_generated_zero_step_completion_is_rejected(self):
         strategy = FakeStrategy([
             SkillSource(code=_skill_code(), generated=True)
@@ -361,6 +400,22 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(strategy.failed[0][0], "survive")
         self.assertEqual(strategy.failed[1][0], "survive")
         self.assertEqual(strategy.failed[2][0], "collect-wood")
+
+    def test_survive_disables_danger_interrupt_to_allow_recovery_policy(self):
+        survive = _task("survive", None)
+        executor = FakeExecutor(complete=False)
+        agent = _agent(
+            curriculum=FakeCurriculum([survive]),
+            strategy=FakeStrategy([SkillSource(code=_skill_code())]),
+            executor=executor,
+            max_iterations=1,
+        )
+
+        agent.run()
+
+        self.assertFalse(executor.calls[0]["danger_interrupt_enabled"])
+        self.assertFalse(executor.calls[0]["health_interrupt_enabled"])
+        self.assertTrue(executor.calls[0]["survival_progress_enabled"])
 
     def test_generic_task_skipped_after_consecutive_failures(self):
         collect = _task("collect-wood", "collect_wood")

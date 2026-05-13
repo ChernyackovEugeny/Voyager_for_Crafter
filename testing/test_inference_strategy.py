@@ -43,9 +43,9 @@ def _task():
     )
 
 
-def _candidate(similarity):
+def _candidate(similarity, name="collect_wood"):
     skill = SkillRecord(
-        name="existing_wood",
+        name=name,
         code="def collect_wood(state):\n    state = yield 0\n",
         description="Chop a tree to obtain wood.",
     )
@@ -63,7 +63,7 @@ class InferenceStrategyTests(unittest.TestCase):
             candidates=[_candidate(0.9)],
         )
 
-        self.assertEqual(source.reused_name, "existing_wood")
+        self.assertEqual(source.reused_name, "collect_wood")
         self.assertFalse(source.generated)
 
     def test_low_similarity_returns_none(self):
@@ -74,6 +74,23 @@ class InferenceStrategyTests(unittest.TestCase):
             obs=None,
             info={},
             candidates=[_candidate(0.2)],
+        )
+
+        self.assertIsNone(source)
+
+    def test_high_similarity_incompatible_achievement_returns_none(self):
+        strategy = InferenceStrategy(reuse_threshold=0.85)
+        task = Task(
+            name="place-table",
+            description="Place a crafting table.",
+            achievement_key="place_table",
+        )
+
+        source = strategy.acquire_skill(
+            task=task,
+            obs=None,
+            info={},
+            candidates=[_candidate(0.95, name="collect_wood_2")],
         )
 
         self.assertIsNone(source)

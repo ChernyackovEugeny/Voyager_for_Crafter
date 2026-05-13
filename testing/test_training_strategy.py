@@ -149,7 +149,7 @@ class DuplicateSkillManager(FakeSkillManager):
         return SaveResult(
             saved=False,
             outcome="duplicate",
-            similar_to="existing_wood",
+            similar_to="collect_wood",
             similarity=0.95,
         )
 
@@ -186,7 +186,7 @@ def _broken_skill_code():
     return "def collect_wood(state):\n    state = yield from move_left(state)\n"
 
 
-def _candidate(name="existing_wood", similarity=0.9):
+def _candidate(name="collect_wood", similarity=0.9):
     skill = SkillRecord(
         name=name,
         code=_skill_code(),
@@ -217,9 +217,23 @@ class TrainingStrategyTests(unittest.TestCase):
             candidates=[_candidate(similarity=0.9)],
         )
 
-        self.assertEqual(source.reused_name, "existing_wood")
+        self.assertEqual(source.reused_name, "collect_wood")
         self.assertFalse(source.generated)
         self.assertEqual(codegen.calls, [])
+
+    def test_high_similarity_incompatible_achievement_does_not_reuse(self):
+        codegen = FakeCodeGen()
+        strategy = TrainingStrategy(codegen=codegen, reuse_threshold=0.85)
+
+        source = strategy.acquire_skill(
+            task=_place_table_task(),
+            obs=None,
+            info=_info(),
+            candidates=[_candidate(name="collect_wood_2", similarity=0.95)],
+        )
+
+        self.assertTrue(source.generated)
+        self.assertEqual(len(codegen.calls), 1)
 
     def test_low_similarity_calls_codegen_with_retrieved_context(self):
         codegen = FakeCodeGen()
@@ -236,7 +250,7 @@ class TrainingStrategyTests(unittest.TestCase):
         self.assertEqual(len(codegen.calls), 1)
         self.assertEqual(
             codegen.calls[0]["retrieved_skills"][0]["name"],
-            "existing_wood",
+            "collect_wood",
         )
 
     def test_codegen_error_returns_none(self):
@@ -369,6 +383,28 @@ class TrainingStrategyTests(unittest.TestCase):
         self.assertEqual(manager.saved[0]["name"], "collect_wood")
         self.assertEqual(manager.successes, ["collect_wood"])
 
+    def test_generated_achievement_skill_uses_achievement_key_for_name(self):
+        manager = FakeSkillManager()
+        strategy = TrainingStrategy(codegen=FakeCodeGen(), reuse_threshold=0.85)
+        task = Task(
+            name="wood-task",
+            description="Chop a tree to obtain wood.",
+            achievement_key="collect_wood",
+        )
+
+        strategy.on_task_completed(
+            task=task,
+            source=strategy.acquire_skill(
+                task=task,
+                obs=None,
+                info=_info(),
+                candidates=[],
+            ),
+            skill_manager=manager,
+        )
+
+        self.assertEqual(manager.saved[0]["name"], "collect_wood")
+
     def test_reused_success_records_success_only(self):
         manager = FakeSkillManager()
         strategy = TrainingStrategy(codegen=FakeCodeGen(), reuse_threshold=0.85)
@@ -386,7 +422,7 @@ class TrainingStrategyTests(unittest.TestCase):
         )
 
         self.assertEqual(manager.saved, [])
-        self.assertEqual(manager.successes, ["existing_wood"])
+        self.assertEqual(manager.successes, ["collect_wood"])
 
     def test_duplicate_save_records_success_on_existing_skill(self):
         manager = DuplicateSkillManager()
@@ -403,7 +439,7 @@ class TrainingStrategyTests(unittest.TestCase):
             skill_manager=manager,
         )
 
-        self.assertEqual(manager.successes, ["existing_wood"])
+        self.assertEqual(manager.successes, ["collect_wood"])
 
     def test_reused_failure_records_metric_and_curriculum_failure(self):
         manager = FakeSkillManager()
@@ -424,13 +460,13 @@ class TrainingStrategyTests(unittest.TestCase):
             curriculum=curriculum,
         )
 
-        self.assertEqual(manager.failures, ["existing_wood"])
+        self.assertEqual(manager.failures, ["collect_wood"])
         self.assertEqual(len(curriculum.failures), 1)
 
     def test_reused_failure_reflects_and_updates_code_when_enabled(self):
         manager = FakeSkillManager()
-        manager.records["existing_wood"] = SkillRecord(
-            name="existing_wood",
+        manager.records["collect_wood"] = SkillRecord(
+            name="collect_wood",
             code=_skill_code(),
             description="Chop a tree to obtain wood.",
             success_count=1,
@@ -465,7 +501,7 @@ class TrainingStrategyTests(unittest.TestCase):
 
         self.assertIs(call, reflection.call)
         self.assertEqual(len(reflection.calls), 1)
-        self.assertEqual(manager.code_updates[0][0], "existing_wood")
+        self.assertEqual(manager.code_updates[0][0], "collect_wood")
         self.assertIn("yield 1", manager.code_updates[0][1])
 
     def test_place_table_can_reflect_when_missing_wood_runtime_resource(self):
@@ -503,8 +539,8 @@ class TrainingStrategyTests(unittest.TestCase):
 
     def test_reused_failure_skips_reflection_after_limit(self):
         manager = FakeSkillManager()
-        manager.records["existing_wood"] = SkillRecord(
-            name="existing_wood",
+        manager.records["collect_wood"] = SkillRecord(
+            name="collect_wood",
             code=_skill_code(),
             description="Chop a tree to obtain wood.",
             success_count=1,
@@ -559,6 +595,78 @@ class TrainingStrategyTests(unittest.TestCase):
         self.assertEqual(manager.saved, [])
         self.assertEqual(len(curriculum.failures), 1)
 
+    def test_generated_runtime_error_queues_fixed_skill_for_retry(self):
+        fixed_code = "def collect_wood(state):\n    state = yield 1\n"
+        bug_fixer = FakeBugFixer(fix_codes=[fixed_code])
+        strategy = TrainingStrategy(
+            codegen=FakeCodeGen(),
+            bug_fixer=bug_fixer,
+            reuse_threshold=0.85,
+            skill_validator=lambda code, **kwargs: load_skill(code, **kwargs),
+        )
+        task = _task()
+        source = strategy.acquire_skill(
+            task=task, obs=None, info=_info(), candidates=[],
+        )
+
+        call = strategy.on_task_failed(
+            task=task,
+            source=source,
+            state={
+                "info": _info(),
+                "failure_reason": "error",
+                "error_traceback": "NameError: scout_safely",
+            },
+            skill_manager=FakeSkillManager(),
+            curriculum=FakeCurriculum(),
+        )
+        retry = strategy.acquire_skill(
+            task=task, obs=None, info=_info(), candidates=[],
+        )
+
+        self.assertEqual(call[0], "fix_bug")
+        self.assertEqual(retry.code, fixed_code)
+        self.assertTrue(retry.generated)
+        self.assertEqual(len(bug_fixer.fix_calls), 1)
+
+    def test_reused_runtime_error_updates_skill_after_fix_validation(self):
+        fixed_code = "def collect_wood(state):\n    state = yield 1\n"
+        bug_fixer = FakeBugFixer(fix_codes=[fixed_code])
+        manager = FakeSkillManager()
+        manager.records["collect_wood"] = SkillRecord(
+            name="collect_wood",
+            code=_skill_code(),
+            description="Chop a tree to obtain wood.",
+            success_count=1,
+        )
+        strategy = TrainingStrategy(
+            codegen=FakeCodeGen(),
+            bug_fixer=bug_fixer,
+            reuse_threshold=0.85,
+            skill_validator=lambda code, **kwargs: load_skill(code, **kwargs),
+        )
+        source = strategy.acquire_skill(
+            task=_task(),
+            obs=None,
+            info=_info(),
+            candidates=[_candidate(similarity=0.9)],
+        )
+
+        call = strategy.on_task_failed(
+            task=_task(),
+            source=source,
+            state={
+                "info": _info(),
+                "failure_reason": "error",
+                "error_traceback": "TypeError: bad runtime call",
+            },
+            skill_manager=manager,
+            curriculum=FakeCurriculum(),
+        )
+
+        self.assertEqual(call[0], "fix_bug")
+        self.assertEqual(manager.code_updates, [("collect_wood", fixed_code)])
+
     def test_unique_skill_name_adds_version_suffix(self):
         manager = FakeSkillManager()
         manager.existing.update({"collect_wood", "collect_wood_v2"})
@@ -579,8 +687,8 @@ class TrainingStrategyTests(unittest.TestCase):
 
     def test_reflection_skipped_when_executor_steps_below_threshold(self):
         manager = FakeSkillManager()
-        manager.records["existing_wood"] = SkillRecord(
-            name="existing_wood",
+        manager.records["collect_wood"] = SkillRecord(
+            name="collect_wood",
             code=_skill_code(),
             description="Chop a tree to obtain wood.",
             success_count=1,
@@ -616,7 +724,7 @@ class TrainingStrategyTests(unittest.TestCase):
         self.assertIsNone(call)
         self.assertEqual(reflection.calls, [])
 
-    def test_zero_step_task_incomplete_can_reflect(self):
+    def test_zero_step_task_incomplete_skips_reflection(self):
         manager = FakeSkillManager()
         manager.records["survive"] = SkillRecord(
             name="survive",
@@ -652,7 +760,8 @@ class TrainingStrategyTests(unittest.TestCase):
             curriculum=FakeCurriculum(),
         )
 
-        self.assertIs(call, reflection.call)
+        self.assertIsNone(call)
+        self.assertEqual(reflection.calls, [])
 
     def test_codegen_receives_previous_failure_on_retry(self):
         codegen = FakeCodeGen()
@@ -695,7 +804,7 @@ class TrainingStrategyTests(unittest.TestCase):
             skill_manager=FakeSkillManager(),
             curriculum=FakeCurriculum(),
         )
-        # Now mark success — buffer should clear.
+        # Now mark success - buffer should clear.
         strategy.on_task_completed(
             task=task,
             source=source1,

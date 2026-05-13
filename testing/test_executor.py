@@ -255,6 +255,23 @@ class TestExecutor(unittest.TestCase):
         result = ex.run(skill, env, state())
         self.assertEqual(result.reason, InterruptReason.TIMEOUT)
 
+    def test_stagnation_warmup_delays_interrupt(self):
+        ex = Executor(
+            max_steps_per_skill=50,
+            health_threshold=4,
+            stagnation_window=2,
+            min_steps_before_stagnation_interrupt=5,
+        )
+        env = FakeEnv([("obs", 0.0, False, False, state()["info"])])
+
+        def skill(current):
+            while True:
+                current = yield 0
+
+        result = ex.run(skill, env, state())
+        self.assertEqual(result.reason, InterruptReason.STAGNATION)
+        self.assertEqual(result.steps, 5)
+
     def test_movement_prevents_stagnation(self):
         ex = Executor(
             max_steps_per_skill=3,

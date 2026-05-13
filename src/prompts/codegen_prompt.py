@@ -167,13 +167,6 @@ All primitives below are available in every skill function without imports.
                    "lava", "coal", "iron", "diamond", "table", "furnace"
         objects:   "cow", "zombie", "skeleton", "arrow", "plant"
 
-  explore_for(object_type: str, state: dict, max_steps: int = 80) -> Generator
-      Expanding-spiral exploration until object_type becomes visible.
-      This is a sub-generator. ALWAYS call it with `yield from`:
-          coords, state = yield from explore_for("water", state, max_steps=120)
-      It returns (coords, updated_state). coords is None if the object was not
-      found within max_steps.
-
   go_to(target_coords: tuple, state: dict) -> Generator
       BFS pathfinding from the player's current position to target_coords.
       This is a sub-generator — ALWAYS call it with `yield from` and
@@ -201,6 +194,8 @@ All primitives below are available in every skill function without imports.
 
   get_memory() -> dict
       Returns {obj_name: (x, y)} — locations saved in previous steps.
+      Takes no arguments. Use `get_memory().get("water")`, never
+      `get_memory("water")`.
 
   save_in_memory(obj: str, coords: tuple) -> None
       Saves or overwrites a location in spatial memory.
@@ -213,6 +208,16 @@ All primitives below are available in every skill function without imports.
 
   get_home() -> tuple | None
       Returns the home location, or None if not set.
+
+Memory is part of the task, not optional bookkeeping. When a skill discovers
+water, food, a crafting table, or a safe base, save it immediately. Before
+exploring for water/food/home again, check get_memory() and get_home() first
+and navigate to remembered coordinates if they exist.
+
+Coordinates from `find_nearest(...)`, `find_nearest_hostile(...)`,
+`get_home()`, and `get_memory().get(...)` are optional. Never index them and
+never pass them to `go_to`, `save_in_memory`, or `set_home` until they have
+passed an explicit `if coords is not None:` guard.
 
 ================================================================================
 ## 6. State Dictionary Structure
@@ -271,9 +276,6 @@ CORRECT — state updated after each step:
 For go_to (a sub-generator), use yield from and capture the returned state:
   state = yield from go_to(coords, state)
 
-For explore_for (a sub-generator), use yield from and capture both values:
-  coords, state = yield from explore_for("water", state, max_steps=120)
-
 NEVER use `yield from` with action primitives. They return int, not generators:
 
 WRONG:
@@ -289,9 +291,10 @@ The last yield of a function does NOT need `state = ...` unless you use
 
 Skills must make a sustained attempt within one execution. Do not return after
 one exploratory movement just because the target is not visible. Use bounded
-loops (usually 20-80 environment steps) to explore, re-check perception, move
-to the target, and interact repeatedly. The Executor already has a hard timeout,
-so bounded loops are safe.
+loops (usually 20-80 environment steps) to scout with movement primitives,
+re-check perception, move to the target, and interact repeatedly. Every scouting
+step must update state and re-check danger before continuing. The Executor
+already has a hard timeout, so bounded loops are safe.
 
 Skills must be self-aware. Before expensive navigation, combat, sleeping, or
 resource collection, inspect `state["info"]["inventory"]`, current achievements,
@@ -301,9 +304,18 @@ yield. For crafting and placement tasks, verify current inventory counts and
 collect missing resources inside the same skill when a suitable learned
 sub-skill is available.
 
+For survival tasks, prioritize staying alive over unlocking achievements:
+restore drink and food, avoid visible hostiles, return to remembered water or
+home when possible, and only then continue the requested objective.
+
 If the task target is not visible in the current observation, the correct
 behavior is exploration inside the same skill execution, not immediate return.
-Use `explore_for(...)` for target objects that may not be visible initially.
+Use short, explicit scouting loops with movement primitives and `find_nearest`.
+Call movement primitives directly inside if/elif branches; do not store
+movement functions in variables or lists and then call that variable.
+Do not scout with a four-step `right, down, left, up` loop; that just circles
+the starting cells. Use expanding sweeps or longer segments before turning.
+Do not call `explore_for`; it is not available.
 
 ================================================================================
 ## 8. Output Format Rules
@@ -318,6 +330,14 @@ Use `explore_for(...)` for target objects that may not be visible initially.
 - Apply the yield/send protocol correctly (`state = yield <action>`).
 - The function should usually yield many actions, not just one.
 - If a target is not visible, explore in a loop and keep checking again.
+- Do not call unknown helpers such as `explore_for`, `chop_tree`, or
+  `drink_water`. Only use listed primitives and retrieved learned skills.
+- Do not invent helper functions like `find_water`, `go_to_water`,
+  `find_and_drink_water`, or `direction_func`.
+- Guard optional coordinates before use: `if coords is not None:` before
+  indexing, `go_to(coords, state)`, `save_in_memory(...)`, or `set_home(...)`.
+- Do not call a variable that contains a function. Use direct calls such as
+  `move_right()` or `move_down()` inside if/elif branches.
 - No explanations or comments outside the code fence.
 
 ================================================================================
@@ -329,12 +349,34 @@ Use `explore_for(...)` for target objects that may not be visible initially.
 ```python
 def collect_wood(state):
     # Try for many steps; do not stop after one failed perception check.
+    direction = 0
+    segment_len = 3
+    segment_progress = 0
+    turns = 0
     for step in range(40):
         if state["info"]["achievements"].get("collect_wood", 0):
             return
+        if is_hostile_visible(state):
+            state = yield move_away_from_hostile(state)
+            continue
 
-        coords, state = yield from explore_for("tree", state, max_steps=30)
+        coords = find_nearest("tree", state)
         if coords is None:
+            if direction == 0:
+                state = yield move_right()
+            elif direction == 1:
+                state = yield move_down()
+            elif direction == 2:
+                state = yield move_left()
+            else:
+                state = yield move_up()
+            segment_progress += 1
+            if segment_progress >= segment_len:
+                direction = (direction + 1) % 4
+                segment_progress = 0
+                turns += 1
+                if turns % 2 == 0:
+                    segment_len += 2
             continue
 
         state = yield from go_to(coords, state)
@@ -364,13 +406,42 @@ def make_wood_pickaxe(state):
 
 ```python
 def collect_drink(state):
+    direction = 0
+    segment_len = 4
+    segment_progress = 0
+    turns = 0
     for _ in range(2):
         if state["info"]["achievements"].get("collect_drink", 0):
             return
 
-        water_coords, state = yield from explore_for("water", state, max_steps=120)
+        memory = get_memory()
+        water_coords = memory.get("water")
+        if water_coords is None:
+            for step in range(80):
+                if is_hostile_visible(state):
+                    state = yield move_away_from_hostile(state)
+                    continue
+                water_coords = find_nearest("water", state)
+                if water_coords is not None:
+                    break
+                if direction == 0:
+                    state = yield move_right()
+                elif direction == 1:
+                    state = yield move_down()
+                elif direction == 2:
+                    state = yield move_left()
+                else:
+                    state = yield move_up()
+                segment_progress += 1
+                if segment_progress >= segment_len:
+                    direction = (direction + 1) % 4
+                    segment_progress = 0
+                    turns += 1
+                    if turns % 2 == 0:
+                        segment_len += 2
         if water_coords is None:
             continue
+        save_in_memory("water", water_coords)
 
         state = yield from go_to(water_coords, state)
         for _ in range(4):
@@ -421,6 +492,17 @@ def format_user_prompt(
                            section is appended asking for a different approach.
     """
     skills_block = _format_retrieved_skills(retrieved_skills)
+    skill_names = [s.get("name", "") for s in retrieved_skills if s.get("name")]
+    if skill_names:
+        whitelist_line = (
+            "Callable user-skill names (exact list — any other name will be "
+            f"rejected): {', '.join(skill_names)}.\n"
+        )
+    else:
+        whitelist_line = (
+            "No user-skill names are callable. Use primitives only; do not "
+            "invent helper functions.\n"
+        )
     previous_block = ""
     if previous_failure is not None:
         broken_code, failure_reason = previous_failure
@@ -441,6 +523,7 @@ def format_user_prompt(
         f"with `yield from <skill_name>(state)` and they will return the\n"
         f"updated state. Treat them as additional building blocks.\n\n"
         f"{skills_block}\n\n"
+        f"{whitelist_line}\n"
         f"{previous_block}"
         f"## Your Job\n"
         f"Write a Python generator function to accomplish the task above.\n"

@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import crafter.constants as C
 from environment.ids import NAME_TO_ID
-from skills.primitives import craft, explore_for, find_nearest, get_position, go_to, place
+from skills.primitives import craft, find_nearest, get_position, go_to, place
 
 
 class PrimitiveTests(unittest.TestCase):
@@ -86,49 +86,18 @@ class PrimitiveTests(unittest.TestCase):
         first_action = next(generator)
         self.assertNotEqual(first_action, C.actions.index("move_right"))
 
-    def test_explore_for_returns_visible_target_without_moving(self):
-        semantic = np.full((64, 64), NAME_TO_ID["grass"], dtype=int)
-        semantic[4, 0] = NAME_TO_ID["water"]
+    def test_go_to_returns_without_error_for_missing_target(self):
         state = {
             "obs": None,
             "info": {
-                "semantic": semantic,
+                "semantic": np.full((64, 64), NAME_TO_ID["grass"], dtype=int),
                 "player_pos": (0, 0),
                 "view_size": (9, 9),
                 "inventory": {},
             },
         }
-        generator = explore_for("water", state, max_steps=5)
+        generator = go_to(None, state)
 
         with self.assertRaises(StopIteration) as ctx:
             next(generator)
-        coords, returned_state = ctx.exception.value
-        self.assertEqual(coords, (4, 0))
-        self.assertIs(returned_state, state)
-
-    def test_explore_for_uses_expanding_spiral_actions(self):
-        semantic = np.full((64, 64), NAME_TO_ID["grass"], dtype=int)
-        state = {
-            "obs": None,
-            "info": {
-                "semantic": semantic,
-                "player_pos": (20, 20),
-                "view_size": (9, 9),
-                "inventory": {},
-            },
-        }
-        generator = explore_for("water", state, max_steps=6)
-
-        actions = []
-        actions.append(next(generator))
-        for _ in range(5):
-            actions.append(generator.send(state))
-
-        self.assertEqual(actions, [
-            C.actions.index("move_right"),
-            C.actions.index("move_down"),
-            C.actions.index("move_left"),
-            C.actions.index("move_left"),
-            C.actions.index("move_up"),
-            C.actions.index("move_up"),
-        ])
+        self.assertIs(ctx.exception.value, state)
