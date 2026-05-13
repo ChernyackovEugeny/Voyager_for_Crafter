@@ -307,6 +307,10 @@ sub-skill is available.
 For survival tasks, prioritize staying alive over unlocking achievements:
 restore drink and food, avoid visible hostiles, return to remembered water or
 home when possible, and only then continue the requested objective.
+Do not treat an already unlocked survival achievement as proof that the current
+stat is safe. If the task is to restore drink or food, continue drinking or
+eating until the inventory stat reaches the requested threshold even when
+`collect_drink` or `eat_cow` is already 1.
 
 If the task target is not visible in the current observation, the correct
 behavior is exploration inside the same skill execution, not immediate return.

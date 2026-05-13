@@ -47,7 +47,35 @@ def _observation_line(info: dict) -> str:
         if uid in _ID_TO_NAME and _ID_TO_NAME[uid] not in _BACKGROUND
     )
     body = ", ".join(visible) if visible else "nothing notable"
+    locations = _location_hints(info)
+    if locations:
+        return f"Observation: {body}. Nearby: {locations}"
     return f"Observation: {body}"
+
+
+def _location_hints(info: dict, *, limit: int = 8) -> str:
+    semantic, (x_offset, y_offset) = visible_semantic_window(info)
+    player_pos = info.get("player_pos")
+    if semantic.size == 0 or player_pos is None:
+        return ""
+    px, py = int(player_pos[0]), int(player_pos[1])
+    hints: list[tuple[int, str]] = []
+    for raw_id in np.unique(semantic):
+        name = _ID_TO_NAME.get(int(raw_id))
+        if name is None or name in _BACKGROUND:
+            continue
+        positions = np.argwhere(semantic == raw_id)
+        if len(positions) == 0:
+            continue
+        absolute = positions + np.array([x_offset, y_offset])
+        dists = np.abs(absolute - np.array([px, py])).sum(axis=1)
+        nearest = absolute[np.argmin(dists)]
+        dx = int(nearest[0]) - px
+        dy = int(nearest[1]) - py
+        dist = abs(dx) + abs(dy)
+        hints.append((dist, f"{name}(dx={dx},dy={dy})"))
+    hints.sort(key=lambda item: (item[0], item[1]))
+    return ", ".join(text for _, text in hints[:limit])
 
 
 def _inventory_line(info: dict) -> str:

@@ -334,6 +334,8 @@ def _has_completed_inference_seed(
 def _build_report(settings: Settings, args: EvalArgs) -> dict[str, Any]:
     rows = _fetch_episode_rows(settings, args.eval_id)
     costs = _fetch_cost_by_run(settings, args.eval_id)
+    task_diagnostics = _fetch_task_diagnostics(settings, args.eval_id)
+    llm_diagnostics = _fetch_llm_diagnostics(settings, args.eval_id)
     per_run = []
     for run_idx in range(args.n_training_runs):
         training = [
@@ -358,6 +360,10 @@ def _build_report(settings: Settings, args: EvalArgs) -> dict[str, Any]:
             "inference_score": crafter_score(inference),
             "training_success_rates": achievement_success_rates(training_window),
             "inference_success_rates": achievement_success_rates(inference),
+            "diagnostics": {
+                "tasks": task_diagnostics.get(run_idx, {}),
+                "llm": llm_diagnostics.get(run_idx, {}),
+            },
         })
 
     return {
@@ -433,6 +439,99 @@ def _fetch_cost_by_run(settings: Settings, eval_id: str) -> dict[int, float]:
             }
 
 
+def _fetch_task_diagnostics(
+    settings: Settings,
+    eval_id: str,
+) -> dict[int, dict[str, Any]]:
+    with _connect(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    s.run_metadata->>'eval_run_idx' AS run_idx,
+                    s.run_metadata->>'mode' AS mode,
+                    t.task_name,
+                    COALESCE(t.failure_reason, 'complete') AS outcome,
+                    COUNT(*) AS attempts,
+                    COUNT(*) FILTER (WHERE t.steps = 0) AS zero_step_attempts
+                FROM task_attempts t
+                JOIN sessions s ON s.session_id = t.session_id
+                WHERE s.run_metadata @> %s::jsonb
+                  AND s.status = 'completed'
+                GROUP BY 1, 2, 3, 4
+                """,
+                (json.dumps({"eval_id": eval_id}),),
+            )
+            out: dict[int, dict[str, Any]] = {}
+            for run_idx, mode, task, outcome, attempts, zero_steps in cur.fetchall():
+                if run_idx is None:
+                    continue
+                run = out.setdefault(int(run_idx), {"by_mode": {}})
+                mode_data = run["by_mode"].setdefault(
+                    mode,
+                    {
+                        "attempts": 0,
+                        "zero_step_attempts": 0,
+                        "outcomes": {},
+                        "top_tasks": {},
+                    },
+                )
+                mode_data["attempts"] += int(attempts)
+                mode_data["zero_step_attempts"] += int(zero_steps)
+                mode_data["outcomes"][outcome] = (
+                    mode_data["outcomes"].get(outcome, 0) + int(attempts)
+                )
+                mode_data["top_tasks"][task] = (
+                    mode_data["top_tasks"].get(task, 0) + int(attempts)
+                )
+            for run in out.values():
+                for mode_data in run["by_mode"].values():
+                    mode_data["top_tasks"] = dict(
+                        sorted(
+                            mode_data["top_tasks"].items(),
+                            key=lambda item: item[1],
+                            reverse=True,
+                        )[:8]
+                    )
+            return out
+
+
+def _fetch_llm_diagnostics(
+    settings: Settings,
+    eval_id: str,
+) -> dict[int, dict[str, Any]]:
+    with _connect(settings) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    s.run_metadata->>'eval_run_idx' AS run_idx,
+                    l.call_type,
+                    COUNT(*) AS calls,
+                    COALESCE(SUM(l.cost_usd), 0.0) AS cost_usd,
+                    COALESCE(SUM(l.tokens_in), 0) AS tokens_in,
+                    COALESCE(SUM(l.tokens_out), 0) AS tokens_out
+                FROM llm_calls l
+                JOIN sessions s ON s.session_id = l.session_id
+                WHERE s.run_metadata @> %s::jsonb
+                  AND s.status = 'completed'
+                GROUP BY 1, 2
+                """,
+                (json.dumps({"eval_id": eval_id}),),
+            )
+            out: dict[int, dict[str, Any]] = {}
+            for run_idx, call_type, calls, cost, tokens_in, tokens_out in cur.fetchall():
+                if run_idx is None:
+                    continue
+                out.setdefault(int(run_idx), {})[call_type] = {
+                    "calls": int(calls),
+                    "cost_usd": float(cost),
+                    "tokens_in": int(tokens_in),
+                    "tokens_out": int(tokens_out),
+                }
+            return out
+
+
 def _skill_count(settings: Settings, collection: str) -> int:
     old_collection = settings.chroma.skills_collection
     try:
@@ -494,6 +593,30 @@ def _markdown_report(report: dict[str, Any]) -> str:
             f"${row['cost_usd']:.4f} | "
             f"{row['training_score']:.4f} | {row['inference_score']:.4f} |"
         )
+    lines.extend(["", "## Diagnostics", ""])
+    for row in report["per_run"]:
+        diag = row.get("diagnostics", {})
+        lines.append(f"### Run {row['run_idx']}")
+        llm = diag.get("llm", {})
+        if llm:
+            parts = [
+                f"{call_type}: {data['calls']} calls, ${data['cost_usd']:.4f}"
+                for call_type, data in sorted(llm.items())
+            ]
+            lines.append(f"- LLM: {'; '.join(parts)}")
+        for mode, data in sorted(diag.get("tasks", {}).get("by_mode", {}).items()):
+            outcomes = ", ".join(
+                f"{name}={count}" for name, count in sorted(data["outcomes"].items())
+            )
+            top_tasks = ", ".join(
+                f"{name}={count}" for name, count in data["top_tasks"].items()
+            )
+            lines.append(
+                f"- {mode}: attempts={data['attempts']}, "
+                f"zero_step={data['zero_step_attempts']}, "
+                f"outcomes=({outcomes}), top_tasks=({top_tasks})"
+            )
+        lines.append("")
     lines.append("")
     return "\n".join(lines)
 

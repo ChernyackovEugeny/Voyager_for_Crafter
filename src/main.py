@@ -71,7 +71,7 @@ import argparse
 import logging
 
 from agent.agent import Agent
-from agent.bootstrap import bootstrap_initial_skills
+from agent.bootstrap import BOOTSTRAP_CODE, bootstrap_initial_skills
 from agent.executor import Executor
 from agent.memory import SpatialMemory
 from agent.strategies.inference import InferenceStrategy
@@ -254,6 +254,7 @@ def main(argv: list[str] | None = None) -> None:
                 max_fix_attempts=settings.llm.max_fix_attempts,
                 skill_validator=skill_validator,
                 min_reflection_steps=settings.executor.min_reflection_steps,
+                protected_reflection_skill_names=set(BOOTSTRAP_CODE),
             )
         else:
             strategy = InferenceStrategy(

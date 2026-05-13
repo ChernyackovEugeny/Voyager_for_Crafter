@@ -106,6 +106,8 @@ def _candidate_matches_task(task, candidate) -> bool:
 
 _SURVIVAL_SKILL_NAMES = {
     "collect_drink",
+    "restore_drink",
+    "restore_food",
     "eat_cow",
     "secure_water",
     "secure_food",

@@ -34,6 +34,7 @@ class TrainingStrategy(AgentStrategy):
         max_fix_attempts: int = 3,
         skill_validator=None,
         min_reflection_steps: int = 3,
+        protected_reflection_skill_names: set[str] | frozenset[str] = frozenset(),
     ):
         self._codegen = codegen
         self._bug_fixer = bug_fixer
@@ -44,6 +45,9 @@ class TrainingStrategy(AgentStrategy):
         self._max_fix_attempts = max_fix_attempts
         self._skill_validator = skill_validator
         self._min_reflection_steps = min_reflection_steps
+        self._protected_reflection_skill_names = frozenset(
+            protected_reflection_skill_names
+        )
         self._pending_llm_calls: list[tuple[str, object]] = []
         self._last_codegen_failure: dict[str, tuple[str, str]] = {}
         self._pending_fixed_sources: dict[str, SkillSource] = {}
@@ -462,6 +466,12 @@ class TrainingStrategy(AgentStrategy):
         if skill is None:
             logger.info("[Agent] reflection skipped: skill missing")
             return None
+        if skill.name in self._protected_reflection_skill_names:
+            logger.info(
+                "[Agent] reflection skipped: protected bootstrap skill %s",
+                skill.name,
+            )
+            return None
         if skill.success_count <= 0:
             logger.info("[Agent] reflection skipped: skill has no prior success")
             return None
@@ -653,6 +663,8 @@ def _candidate_matches_task(task, candidate) -> bool:
 
 _SURVIVAL_SKILL_NAMES = {
     "collect_drink",
+    "restore_drink",
+    "restore_food",
     "eat_cow",
     "secure_water",
     "secure_food",
