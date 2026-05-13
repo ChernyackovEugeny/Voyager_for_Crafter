@@ -124,6 +124,7 @@ class Agent:
             candidates=candidates,
         )
         if source is None:
+            self._log_pending_strategy_llm_calls()
             self.strategy.on_skill_unavailable(
                 task=task,
                 state=state,
@@ -226,10 +227,25 @@ class Agent:
             logger.info("[Executor] error: %s", first_line)
 
     def _log_source_llm_call(self, source) -> None:
+        calls = getattr(source, "llm_calls", None)
+        if calls:
+            for call_type, call in calls:
+                self._log_llm_call(call, call_type=call_type)
+            return
         call = getattr(source, "llm_call", None)
         if call is None:
             return
-        self._log_llm_call(call, call_type="codegen")
+        self._log_llm_call(
+            call,
+            call_type=getattr(source, "llm_call_type", "codegen"),
+        )
+
+    def _log_pending_strategy_llm_calls(self) -> None:
+        drain = getattr(self.strategy, "drain_pending_llm_calls", None)
+        if drain is None:
+            return
+        for call_type, call in drain():
+            self._log_llm_call(call, call_type=call_type)
 
     def _log_llm_call(self, call, *, call_type: str) -> None:
         if call is None:

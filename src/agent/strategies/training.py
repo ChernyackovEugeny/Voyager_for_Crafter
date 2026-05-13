@@ -20,16 +20,23 @@ class TrainingStrategy(AgentStrategy):
         self,
         *,
         codegen,
+        bug_fixer=None,
         reuse_threshold: float,
         reflection=None,
         reflection_enabled: bool = False,
         max_reflections_per_skill: int = 3,
+        max_fix_attempts: int = 3,
+        skill_validator=None,
     ):
         self._codegen = codegen
+        self._bug_fixer = bug_fixer
         self._reuse_threshold = reuse_threshold
         self._reflection = reflection
         self._reflection_enabled = reflection_enabled
         self._max_reflections_per_skill = max_reflections_per_skill
+        self._max_fix_attempts = max_fix_attempts
+        self._skill_validator = skill_validator
+        self._pending_llm_calls: list[tuple[str, object]] = []
 
     def acquire_skill(
         self,
@@ -39,6 +46,7 @@ class TrainingStrategy(AgentStrategy):
         info: dict,
         candidates,
     ):
+        self._pending_llm_calls = []
         selected = self._select_reusable_skill(candidates)
         if selected is not None:
             logger.info("[Agent] reuse: %s", selected.skill.name)
@@ -49,20 +57,31 @@ class TrainingStrategy(AgentStrategy):
             )
 
         logger.info("[Agent] codegen: generating new skill for %s", task.name)
+        state_text = caption(obs, info)
         try:
             call = self._codegen.get_code(
-                state_text=caption(obs, info),
+                state_text=state_text,
                 task=task.description,
                 retrieved_skills=self._retrieved_skill_dicts(candidates),
             )
         except Exception as exc:
             logger.warning("strategy: codegen failed for %s: %s", task.name, exc)
             return None
-        return SkillSource(code=call.code, generated=True, llm_call=call)
+        return self._compile_generated_skill(
+            code=call.code,
+            task=task,
+            state_text=state_text,
+            llm_calls=[("codegen", call)],
+        )
 
     def on_skill_unavailable(self, *, task, state: dict, curriculum) -> None:
         logger.info("[Agent] task failed: %s", task.name)
         curriculum.record_task_failed(task, state)
+
+    def drain_pending_llm_calls(self) -> tuple[tuple[str, object], ...]:
+        calls = tuple(self._pending_llm_calls)
+        self._pending_llm_calls = []
+        return calls
 
     def on_task_completed(self, *, task, source: SkillSource, skill_manager) -> None:
         logger.info("[Agent] task success: %s", task.name)
@@ -133,6 +152,91 @@ class TrainingStrategy(AgentStrategy):
             )
             logger.info("[Agent] metric: record_success(%s)", result.similar_to)
             skill_manager.record_success(result.similar_to)
+
+    def _compile_generated_skill(
+        self,
+        *,
+        code: str,
+        task,
+        state_text: str,
+        llm_calls: list[tuple[str, object]],
+    ):
+        if self._skill_validator is None:
+            call_type, call = llm_calls[-1]
+            return SkillSource(
+                code=code,
+                generated=True,
+                llm_call=call,
+                llm_call_type=call_type,
+                llm_calls=tuple(llm_calls),
+            )
+
+        for attempt in range(self._max_fix_attempts + 1):
+            try:
+                self._skill_validator(code)
+                if attempt > 0:
+                    logger.info(
+                        "[Agent] fix_bug: succeeded after %d attempt(s)",
+                        attempt,
+                    )
+                call_type, call = llm_calls[-1]
+                return SkillSource(
+                    code=code,
+                    generated=True,
+                    llm_call=call,
+                    llm_call_type=call_type,
+                    llm_calls=tuple(llm_calls),
+                )
+            except Exception as exc:
+                if attempt >= self._max_fix_attempts:
+                    logger.warning(
+                        "[Agent] fix_bug: exhausted after %d attempt(s): %s",
+                        self._max_fix_attempts,
+                        exc,
+                    )
+                    self._pending_llm_calls = list(llm_calls)
+                    return None
+
+                logger.info(
+                    "[Agent] fix_bug: attempt %d/%d for %s: %s",
+                    attempt + 1,
+                    self._max_fix_attempts,
+                    task.name,
+                    exc,
+                )
+                if self._bug_fixer is None:
+                    logger.warning("[Agent] fix_bug: no bug_fixer configured")
+                    self._pending_llm_calls = list(llm_calls)
+                    return None
+
+                try:
+                    fixed_call = self._bug_fixer.fix(
+                        skill_code=code,
+                        error_traceback=str(exc),
+                        state_text=state_text,
+                        task=task.description,
+                    )
+                except Exception as fix_exc:
+                    logger.warning(
+                        "[Agent] fix_bug: API call failed for %s: %s",
+                        task.name,
+                        fix_exc,
+                    )
+                    self._pending_llm_calls = list(llm_calls)
+                    return None
+
+                fixed_code = fixed_call.code
+                llm_calls.append(("fix_bug", fixed_call))
+                if fixed_code.strip() == code.strip():
+                    logger.warning(
+                        "[Agent] fix_bug: returned identical code for %s",
+                        task.name,
+                    )
+                    self._pending_llm_calls = list(llm_calls)
+                    return None
+                code = fixed_code
+
+        return None
 
     def _reflect_reused_skill(self, *, task, source, state, skill_manager):
         if not self._reflection_enabled or self._reflection is None:

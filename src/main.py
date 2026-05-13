@@ -15,9 +15,11 @@ from config import get_settings
 from environment.wrapper import CrafterEnv
 from llm.codegen import CodeGen
 from llm.curriculum import HardcodedCurriculum
+from llm.fix_bug import FixBug
 from llm.reflection import Reflection
 from observability.logging_config import configure_logging
 from skills.embedder import TextEmbedder
+from skills.runner import SkillRuntime, load_skill
 from skills.skill_manager import SkillManager
 from storage.skill_repository import ChromaSkillRepository
 
@@ -147,14 +149,21 @@ def main(argv: list[str] | None = None) -> None:
                 args.render_size,
                 args.render_step_delay,
             )
+        memory = SpatialMemory()
         if args.mode == "train":
             strategy = TrainingStrategy(
                 codegen=CodeGen(),
+                bug_fixer=FixBug(),
                 reuse_threshold=settings.embedding.similarity_reuse_threshold,
                 reflection=Reflection() if settings.llm.reflection_enabled else None,
                 reflection_enabled=settings.llm.reflection_enabled,
                 max_reflections_per_skill=(
                     settings.llm.max_reflections_per_skill
+                ),
+                max_fix_attempts=settings.llm.max_fix_attempts,
+                skill_validator=lambda code: load_skill(
+                    code,
+                    runtime=SkillRuntime(memory=memory),
                 ),
             )
         else:
@@ -167,7 +176,7 @@ def main(argv: list[str] | None = None) -> None:
             skill_manager=skill_manager,
             strategy=strategy,
             executor=executor,
-            memory=SpatialMemory(),
+            memory=memory,
             max_iterations_per_episode=(
                 settings.executor.max_iterations_per_episode
             ),

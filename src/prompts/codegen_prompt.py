@@ -5,11 +5,9 @@ SYSTEM_PROMPT — static, module-level constant. Identical across all calls with
 and between sessions, so DeepSeek caches its tokens after the first call.
 
 format_user_prompt  — dynamic user message for get_code.
-format_fix_prompt   — dynamic user message for fix_bug.
 """
 
 CODEGEN_TEMPLATE_ID = "codegen.v1"
-FIX_BUG_TEMPLATE_ID = "fix_bug.v1"
 
 # ---------------------------------------------------------------------------
 # System prompt (static — do not add any dynamic content here)
@@ -407,33 +405,4 @@ def format_user_prompt(
         f"## Your Job\n"
         f"Write a Python generator function to accomplish the task above.\n"
         f"Follow all format and protocol rules from the system prompt exactly."
-    )
-
-
-def format_fix_prompt(
-    state_text: str,
-    task: str,
-    skill_code: str,
-    error_traceback: str,
-) -> str:
-    """
-    Build the user message for fix_bug.
-
-    Args:
-        state_text:       Output of captioner.caption(obs, info).
-        task:             Task description (same as the original get_code call).
-        skill_code:       The broken Python skill code string (no fences).
-        error_traceback:  Exception traceback from traceback.format_exc().
-    """
-    return (
-        f"## Current Game State\n{state_text}\n\n"
-        f"## Task\n{task}\n\n"
-        f"## Broken Skill\n"
-        f"```python\n{skill_code}\n```\n\n"
-        f"## Error Traceback\n"
-        f"```\n{error_traceback}\n```\n\n"
-        f"## Your Job\n"
-        f"The skill above raised an error. Analyze the traceback and fix the bug.\n"
-        f"Return ONLY the corrected Python generator function in a ```python ... ``` fence.\n"
-        f"Do NOT change the function's purpose — only fix the bug."
     )

@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from agent.strategies.training import TrainingStrategy
 from llm.codegen import CodeGenCall
 from llm.curriculum import Task
+from skills.runner import load_skill
 from skills.results import SaveResult, SkillCandidate
 from storage.schemas import SkillRecord
 
@@ -26,20 +27,44 @@ class FakeCodeGen:
         })
         if self.fail:
             raise RuntimeError("llm down")
-        return CodeGenCall(
-            code=self.code,
-            raw_response=f"```python\n{self.code}\n```",
-            model="deepseek-v4-flash",
-            prompt_template_id="codegen.v1",
-            prompt_hash="abc123",
-            prompt_tokens=100,
-            prompt_cache_hit_tokens=40,
-            prompt_cache_miss_tokens=60,
-            completion_tokens=20,
-            reasoning_tokens=None,
-            latency_ms=123,
-            cost_usd=0.001,
-        )
+        return self._call(self.code, "codegen.v1")
+
+    @staticmethod
+    def _call(code, template_id):
+        return _llm_call(code, template_id)
+
+
+class FakeBugFixer:
+    def __init__(self, fix_codes=None):
+        self.fix_calls = []
+        self.fix_codes = list(fix_codes or [])
+
+    def fix(self, *, skill_code, error_traceback, state_text, task):
+        self.fix_calls.append({
+            "skill_code": skill_code,
+            "error_traceback": error_traceback,
+            "state_text": state_text,
+            "task": task,
+        })
+        code = self.fix_codes.pop(0) if self.fix_codes else skill_code
+        return _llm_call(code, "fix_bug.v1")
+
+
+def _llm_call(code, template_id):
+    return CodeGenCall(
+        code=code,
+        raw_response=f"```python\n{code}\n```",
+        model="deepseek-v4-flash",
+        prompt_template_id=template_id,
+        prompt_hash="abc123",
+        prompt_tokens=100,
+        prompt_cache_hit_tokens=40,
+        prompt_cache_miss_tokens=60,
+        completion_tokens=20,
+        reasoning_tokens=None,
+        latency_ms=123,
+        cost_usd=0.001,
+    )
 
 
 class FakeSkillManager:
@@ -148,6 +173,10 @@ def _skill_code():
     return "def collect_wood(state):\n    state = yield 0\n"
 
 
+def _broken_skill_code():
+    return "def collect_wood(state):\n    state = yield from move_left(state)\n"
+
+
 def _candidate(name="existing_wood", similarity=0.9):
     skill = SkillRecord(
         name=name,
@@ -230,6 +259,88 @@ class TrainingStrategyTests(unittest.TestCase):
         self.assertIsNotNone(source.llm_call)
         self.assertEqual(source.llm_call.model, "deepseek-v4-flash")
         self.assertEqual(source.llm_call.prompt_cache_hit_tokens, 40)
+
+    def test_fix_bug_repairs_generated_skill_before_returning_source(self):
+        codegen = FakeCodeGen(
+            code=_broken_skill_code(),
+        )
+        bug_fixer = FakeBugFixer(fix_codes=[_skill_code()])
+        strategy = TrainingStrategy(
+            codegen=codegen,
+            bug_fixer=bug_fixer,
+            reuse_threshold=0.85,
+            max_fix_attempts=3,
+            skill_validator=lambda code: load_skill(code),
+        )
+
+        source = strategy.acquire_skill(
+            task=_task(),
+            obs=None,
+            info=_info(),
+            candidates=[],
+        )
+
+        self.assertIsNotNone(source)
+        self.assertEqual(source.code, _skill_code())
+        self.assertEqual(len(bug_fixer.fix_calls), 1)
+        self.assertEqual(
+            [call_type for call_type, _ in source.llm_calls],
+            ["codegen", "fix_bug"],
+        )
+        self.assertEqual(source.llm_call_type, "fix_bug")
+
+    def test_fix_bug_exhaustion_returns_none(self):
+        codegen = FakeCodeGen(
+            code="def collect_wood(state)\n    state = yield 0\n",
+        )
+        bug_fixer = FakeBugFixer(fix_codes=[
+            _broken_skill_code(),
+            "def collect_wood(state):\n    state = yield from move_right(state)\n",
+        ])
+        strategy = TrainingStrategy(
+            codegen=codegen,
+            bug_fixer=bug_fixer,
+            reuse_threshold=0.85,
+            max_fix_attempts=2,
+            skill_validator=lambda code: load_skill(code),
+        )
+
+        source = strategy.acquire_skill(
+            task=_task(),
+            obs=None,
+            info=_info(),
+            candidates=[],
+        )
+
+        self.assertIsNone(source)
+        self.assertEqual(len(bug_fixer.fix_calls), 2)
+        self.assertEqual(
+            [call_type for call_type, _ in strategy.drain_pending_llm_calls()],
+            ["codegen", "fix_bug", "fix_bug"],
+        )
+
+    def test_fix_bug_identical_code_aborts_retry_loop(self):
+        codegen = FakeCodeGen(
+            code=_broken_skill_code(),
+        )
+        bug_fixer = FakeBugFixer(fix_codes=[_broken_skill_code()])
+        strategy = TrainingStrategy(
+            codegen=codegen,
+            bug_fixer=bug_fixer,
+            reuse_threshold=0.85,
+            max_fix_attempts=3,
+            skill_validator=lambda code: load_skill(code),
+        )
+
+        source = strategy.acquire_skill(
+            task=_task(),
+            obs=None,
+            info=_info(),
+            candidates=[],
+        )
+
+        self.assertIsNone(source)
+        self.assertEqual(len(bug_fixer.fix_calls), 1)
 
     def test_generated_success_saves_and_records_success(self):
         manager = FakeSkillManager()

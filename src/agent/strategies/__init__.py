@@ -11,6 +11,8 @@ class SkillSource:
     reused_name: str | None = None
     generated: bool = False
     llm_call: object | None = None
+    llm_call_type: str = "codegen"
+    llm_calls: tuple[tuple[str, object], ...] = ()
 
 
 class AgentStrategy:

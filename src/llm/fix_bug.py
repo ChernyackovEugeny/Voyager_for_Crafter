@@ -9,16 +9,16 @@ import openai
 
 from config import get_settings
 from llm.pricing import compute_cost
-from prompts.codegen_prompt import (
-    CODEGEN_TEMPLATE_ID,
-    SYSTEM_PROMPT,
-    format_user_prompt,
+from prompts.fix_bug_prompt import (
+    FIX_BUG_SYSTEM_PROMPT,
+    FIX_BUG_TEMPLATE_ID,
+    format_fix_bug_prompt,
 )
 
 
 @dataclass(frozen=True)
-class CodeGenCall:
-    """Code generation result plus billing/latency metadata."""
+class FixBugCall:
+    """Compile/load-time repair result plus billing/latency metadata."""
 
     code: str
     raw_response: str
@@ -42,8 +42,8 @@ class CodeGenCall:
         return self.completion_tokens
 
 
-class CodeGenError(Exception):
-    """LLM call failed after prompt metadata was known."""
+class FixBugError(Exception):
+    """fix_bug LLM call failed after prompt metadata was known."""
 
     def __init__(
         self,
@@ -59,49 +59,41 @@ class CodeGenError(Exception):
         self.latency_ms = latency_ms
 
 
-class CodeGen:
-    """Generates yield-generator skill functions via DeepSeek V3."""
+class FixBug:
+    """Repairs generated skills that fail deterministic load validation."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        client=None,
+        model: str | None = None,
+        temperature: float | None = None,
+        timeout_s: float | None = None,
+    ) -> None:
         cfg = get_settings().llm
-        self._model = cfg.codegen_model
-        self._temperature = cfg.codegen_temperature
-        self._client = openai.OpenAI(
+        self._model = model or cfg.codegen_model
+        self._temperature = cfg.codegen_temperature if temperature is None else temperature
+        self._client = client or openai.OpenAI(
             api_key=cfg.deepseek_api_key,
             base_url=cfg.deepseek_base_url,
-            timeout=cfg.request_timeout_s,
+            timeout=timeout_s or cfg.request_timeout_s,
         )
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def get_code(
+    def fix(
         self,
+        *,
+        skill_code: str,
+        error_traceback: str,
         state_text: str,
         task: str,
-        retrieved_skills: list[dict],
-    ) -> CodeGenCall:
-        """
-        Generate a new skill function for the given task.
-
-        Args:
-            state_text:       captioner.caption(obs, info) output.
-            task:             Task description from the curriculum.
-            retrieved_skills: Top-K similar skills from the vector DB.
-                              Each dict: {"name", "description", "code"}.
-
-        Returns:
-            CodeGenCall with source code and API usage metadata.
-        """
-        user_prompt = format_user_prompt(state_text, task, retrieved_skills)
-        return self._call_api(user_prompt, CODEGEN_TEMPLATE_ID)
-
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
-    def _call_api(self, user_prompt: str, template_id: str) -> CodeGenCall:
+    ) -> FixBugCall:
+        """Return a technically repaired version of a broken generated skill."""
+        user_prompt = format_fix_bug_prompt(
+            state_text=state_text,
+            task=task,
+            skill_code=skill_code,
+            error_traceback=error_traceback,
+        )
         prompt_hash = self._prompt_hash(user_prompt)
         started = time.monotonic()
         try:
@@ -109,15 +101,15 @@ class CodeGen:
                 model=self._model,
                 temperature=self._temperature,
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": FIX_BUG_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
             )
         except Exception as exc:
             latency_ms = int((time.monotonic() - started) * 1000)
-            raise CodeGenError(
+            raise FixBugError(
                 str(exc),
-                prompt_template_id=template_id,
+                prompt_template_id=FIX_BUG_TEMPLATE_ID,
                 prompt_hash=prompt_hash,
                 latency_ms=latency_ms,
             ) from exc
@@ -131,11 +123,11 @@ class CodeGen:
             prompt_cache_miss_tokens=usage["prompt_cache_miss_tokens"],
             completion_tokens=usage["completion_tokens"],
         )
-        return CodeGenCall(
+        return FixBugCall(
             code=self._extract_code(raw),
             raw_response=raw,
             model=self._model,
-            prompt_template_id=template_id,
+            prompt_template_id=FIX_BUG_TEMPLATE_ID,
             prompt_hash=prompt_hash,
             prompt_tokens=usage["prompt_tokens"],
             prompt_cache_hit_tokens=usage["prompt_cache_hit_tokens"],
@@ -148,7 +140,7 @@ class CodeGen:
 
     @staticmethod
     def _prompt_hash(user_prompt: str) -> str:
-        full_prompt = f"{SYSTEM_PROMPT}\n\n{user_prompt}"
+        full_prompt = f"{FIX_BUG_SYSTEM_PROMPT}\n\n{user_prompt}"
         return hashlib.sha256(full_prompt.encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
@@ -192,11 +184,8 @@ class CodeGen:
             "reasoning_tokens": reasoning_tokens,
         }
 
-    def _extract_code(self, raw_response: str) -> str:
-        """
-        Strip ```python ... ``` or ``` ... ``` fences from the LLM response.
-        Falls back to returning the raw response if no fence is found.
-        """
+    @staticmethod
+    def _extract_code(raw_response: str) -> str:
         match = re.search(r"```(?:python)?\n(.*?)```", raw_response, re.DOTALL)
         if match:
             return match.group(1).strip()
