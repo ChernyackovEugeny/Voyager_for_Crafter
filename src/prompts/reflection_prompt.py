@@ -30,6 +30,10 @@ Rules:
     policy so it can block with placed stone/table when available, fight an
     isolated zombie when armed and healthy enough, and flee mainly from
     skeletons/arrows or unsafe fights.
+  - Use `state_history` in the failure snapshot when present. It records recent
+    actions, stats, visible hostiles, hostile distance, position, and unlocked
+    achievements; prefer fixes that address the failed decision sequence rather
+    than only the final state.
   - Do not add explanations outside the code fence.
   - Return exactly one corrected Python function in a ```python code fence.
 """

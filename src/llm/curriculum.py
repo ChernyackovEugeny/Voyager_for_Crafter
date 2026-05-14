@@ -14,7 +14,7 @@ import openai
 
 from config import get_settings
 from environment.achievements import ACHIEVEMENTS, TECH_TREE_ORDER
-from environment.danger import hostile_visible
+from environment.danger import hostile_within
 from llm.curriculum_dsl import ALLOWED_KEYS, ALLOWED_OPS, evaluate
 from llm.pricing import compute_cost
 from llm.survival import is_in_danger, is_recovered, make_survive_task
@@ -73,12 +73,13 @@ class Curriculum(Protocol):
 
 @dataclass(frozen=True)
 class SurvivalSettings:
-    enter_health: int = 7
-    enter_food: int = 6
-    enter_drink: int = 6
+    enter_health: int = 4
+    enter_food: int = 2
+    enter_drink: int = 2
     exit_health: int = 8
     exit_food: int = 6
     exit_drink: int = 6
+    hostile_radius: int = 3
     max_consecutive_failures: int = 3
 
 
@@ -141,26 +142,16 @@ class HardcodedCurriculum:
         """Return the first unfinished unlocked achievement, or None if done."""
         completed = self._completed_from_info(info)
         skipped = skip or set()
-        if "survive" not in skipped and hostile_visible(info):
-            return make_survive_task(Task)
         if "survive" not in skipped and is_in_danger(info, self._survival):
             return make_survive_task(Task)
-        survival_task = _survival_foundation_task(
-            info,
-            completed,
-            skipped,
-            require_wood_before_shelter=True,
-        )
-        if survival_task is not None:
-            return survival_task
         for achievement_key in TECH_TREE_ORDER:
             if achievement_key in completed:
                 continue
             if achievement_key in skipped:
                 continue
-            achievement = ACHIEVEMENTS[achievement_key]
-            if not all(prereq in completed for prereq in achievement.prerequisites):
+            if not _achievement_available(achievement_key, info, completed):
                 continue
+            achievement = ACHIEVEMENTS[achievement_key]
             return Task(
                 name=achievement.key.replace("_", "-"),
                 description=achievement.description,
@@ -171,7 +162,10 @@ class HardcodedCurriculum:
     def is_task_complete(self, task: Task, info: dict[str, Any]) -> bool:
         """Check Level-1 or DSL task completion."""
         if task.name == "survive":
-            return is_recovered(info, self._survival) and not hostile_visible(info)
+            return is_recovered(info, self._survival) and not hostile_within(
+                info,
+                self._survival.hostile_radius,
+            )
         if task.achievement_key is not None:
             return bool(info.get("achievements", {}).get(task.achievement_key, 0))
         if task.completion_conditions:
@@ -251,20 +245,10 @@ class LLMCurriculum:
         skip: set[str] | None = None,
     ) -> Task | None:
         skipped = skip or set()
-        if "survive" not in skipped and hostile_visible(info):
-            return make_survive_task(Task)
         if "survive" not in skipped and is_in_danger(info, self._survival):
             return make_survive_task(Task)
 
         completed = _completed_from_info(info)
-        survival_task = _survival_foundation_task(
-            info,
-            completed,
-            skipped,
-            require_wood_before_shelter=False,
-        )
-        if survival_task is not None:
-            return survival_task
         if len(completed) >= len(ACHIEVEMENTS):
             return None
         available = _available_achievements(info, skipped)
@@ -301,7 +285,10 @@ class LLMCurriculum:
 
     def is_task_complete(self, task: Task, info: dict[str, Any]) -> bool:
         if task.name == "survive":
-            return is_recovered(info, self._survival) and not hostile_visible(info)
+            return is_recovered(info, self._survival) and not hostile_within(
+                info,
+                self._survival.hostile_radius,
+            )
         if task.achievement_key is not None:
             return bool(info.get("achievements", {}).get(task.achievement_key, 0))
         if task.completion_conditions:
@@ -536,10 +523,31 @@ def _available_achievements(info: dict[str, Any], skip: set[str]) -> tuple[str, 
     for key in TECH_TREE_ORDER:
         if key in completed or key in skip:
             continue
-        achievement = ACHIEVEMENTS[key]
-        if all(prereq in completed for prereq in achievement.prerequisites):
+        if _achievement_available(key, info, completed):
             available.append(key)
     return tuple(available)
+
+
+def _achievement_available(
+    key: str,
+    info: dict[str, Any],
+    completed: set[str] | None = None,
+) -> bool:
+    completed = _completed_from_info(info) if completed is None else completed
+    achievement = ACHIEVEMENTS[key]
+    if not all(prereq in completed for prereq in achievement.prerequisites):
+        return False
+    inventory = info.get("inventory", {}) or {}
+    required_items = {
+        "collect_stone": {"wood_pickaxe": 1},
+        "collect_coal": {"wood_pickaxe": 1},
+        "collect_iron": {"stone_pickaxe": 1},
+        "collect_diamond": {"iron_pickaxe": 1},
+    }
+    for item, count in required_items.get(key, {}).items():
+        if int(inventory.get(item, 0) or 0) < count:
+            return False
+    return True
 
 
 def _completed_from_info(info: dict[str, Any]) -> set[str]:

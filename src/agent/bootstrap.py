@@ -104,6 +104,40 @@ BOOTSTRAP_SKILLS: tuple[BootstrapSkillSpec, ...] = (
         ),
     ),
     BootstrapSkillSpec(
+        name="fight_isolated_zombie",
+        description=(
+            "Defeat a single visible zombie only when no skeleton or arrow is "
+            "visible, health is at least 5, and a sword is available. Go "
+            "adjacent, face the zombie, attack with do_action several times, "
+            "and stop fighting if conditions become unsafe."
+        ),
+    ),
+    BootstrapSkillSpec(
+        name="block_with_stone",
+        description=(
+            "Use defensive placement to block a visible threat or close a gap "
+            "near home. If stone is available and can_place_ahead('stone', "
+            "state) is true, place stone, update state, and re-check hostiles."
+        ),
+    ),
+    BootstrapSkillSpec(
+        name="place_table_barrier",
+        description=(
+            "Use a crafting table as an emergency obstacle and home anchor when "
+            "wood is available but stone is not. Place a table only if "
+            "can_place_ahead('table', state) is true, save home, and re-check "
+            "hostiles."
+        ),
+    ),
+    BootstrapSkillSpec(
+        name="wait_at_home",
+        description=(
+            "Return to remembered home if it exists, save current position as "
+            "home otherwise, and wait with noop while repeatedly checking "
+            "hostile visibility and survival stats."
+        ),
+    ),
+    BootstrapSkillSpec(
         name="restore_drink",
         description=(
             "Restore drink to at least 8/9. Use remembered or visible water, "
@@ -243,34 +277,6 @@ def collect_drink(state):
         ):
             return state
         if is_hostile_visible(state):
-            zombie = find_nearest("zombie", state)
-            skeleton = find_nearest("skeleton", state)
-            arrow = find_nearest("arrow", state)
-            has_sword = (
-                inv.get("wood_sword", 0) > 0
-                or inv.get("stone_sword", 0) > 0
-                or inv.get("iron_sword", 0) > 0
-            )
-            if (
-                zombie is not None
-                and skeleton is None
-                and arrow is None
-                and has_sword
-                and inv.get("health", 9) >= 5
-            ):
-                state = yield from go_to(zombie, state)
-                for _ in range(5):
-                    if not is_hostile_visible(state):
-                        break
-                    state = yield do_action()
-                continue
-            if inv.get("stone", 0) > 0 and can_place_ahead("stone", state):
-                state = yield place("stone")
-                continue
-            if inv.get("wood", 0) >= 2 and can_place_ahead("table", state):
-                state = yield place("table")
-                set_home(get_position(state))
-                continue
             state = yield move_away_from_hostile(state)
             continue
         if water_coords is None:
@@ -548,6 +554,81 @@ def place_stone(state):
                 segment_len += 1
     return state
 """,
+    "fight_isolated_zombie": """\
+def fight_isolated_zombie(state):
+    inv = state["info"]["inventory"]
+    zombie = find_nearest("zombie", state)
+    skeleton = find_nearest("skeleton", state)
+    arrow = find_nearest("arrow", state)
+    has_sword = (
+        inv.get("wood_sword", 0) > 0
+        or inv.get("stone_sword", 0) > 0
+        or inv.get("iron_sword", 0) > 0
+    )
+    if skeleton is not None or arrow is not None:
+        return state
+    if not has_sword or inv.get("health", 9) < 5:
+        return state
+    if zombie is not None:
+        state = yield from go_to(zombie, state)
+    else:
+        return state
+    for _ in range(6):
+        if find_nearest("zombie", state) is None:
+            return state
+        if find_nearest("skeleton", state) is not None or find_nearest("arrow", state) is not None:
+            return state
+        if state["info"]["inventory"].get("health", 9) < 4:
+            return state
+        state = yield do_action()
+    return state
+""",
+    "block_with_stone": """\
+def block_with_stone(state):
+    if state["info"]["inventory"].get("stone", 0) < 1:
+        return state
+    for _ in range(4):
+        if not is_hostile_visible(state):
+            return state
+        if can_place_ahead("stone", state):
+            state = yield place("stone")
+            return state
+        state = yield move_away_from_hostile(state)
+    return state
+""",
+    "place_table_barrier": """\
+def place_table_barrier(state):
+    if state["info"]["inventory"].get("wood", 0) < 2:
+        return state
+    for _ in range(4):
+        if not is_hostile_visible(state):
+            return state
+        if can_place_ahead("table", state):
+            state = yield place("table")
+            set_home(get_position(state))
+            table_coords = find_nearest("table", state)
+            if table_coords is not None:
+                save_in_memory("table", table_coords)
+            return state
+        state = yield move_away_from_hostile(state)
+    return state
+""",
+    "wait_at_home": """\
+def wait_at_home(state):
+    home = get_home()
+    if home is not None:
+        state = yield from go_to(home, state)
+    else:
+        set_home(get_position(state))
+    for _ in range(25):
+        if is_hostile_visible(state):
+            return state
+        inv = state["info"]["inventory"]
+        if inv.get("health", 9) >= 8 and inv.get("food", 9) >= 8 and inv.get("drink", 9) >= 8:
+            return state
+        state = yield noop()
+    return state
+""",
     "survive": """\
 def survive_first_night(state):
     direction = 0
@@ -571,6 +652,22 @@ def survive_first_night(state):
         ):
             return state
         if is_hostile_visible(state):
+            before_pos = get_position(state)
+            before_health = inv.get("health", 9)
+            state = yield from fight_isolated_zombie(state)
+            if not is_hostile_visible(state):
+                continue
+            if (
+                get_position(state) != before_pos
+                or state["info"]["inventory"].get("health", 9) < before_health
+            ):
+                continue
+            state = yield from block_with_stone(state)
+            if not is_hostile_visible(state):
+                continue
+            state = yield from place_table_barrier(state)
+            if not is_hostile_visible(state):
+                continue
             state = yield move_away_from_hostile(state)
             continue
         if inv.get("drink", 9) < 7:
@@ -623,7 +720,7 @@ def survive_first_night(state):
                 state = yield place("stone")
                 continue
             if not is_hostile_visible(state):
-                state = yield noop()
+                state = yield from wait_at_home(state)
             continue
         if direction == 0:
             state = yield move_right()

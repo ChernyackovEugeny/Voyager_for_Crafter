@@ -248,9 +248,6 @@ def main(argv: list[str] | None = None) -> None:
                 reuse_threshold=settings.embedding.similarity_reuse_threshold,
                 reflection=Reflection() if settings.llm.reflection_enabled else None,
                 reflection_enabled=settings.llm.reflection_enabled,
-                max_reflections_per_skill=(
-                    settings.llm.max_reflections_per_skill
-                ),
                 max_fix_attempts=settings.llm.max_fix_attempts,
                 skill_validator=skill_validator,
                 min_reflection_steps=settings.executor.min_reflection_steps,
@@ -267,6 +264,7 @@ def main(argv: list[str] | None = None) -> None:
             exit_health=settings.survival.exit_health,
             exit_food=settings.survival.exit_food,
             exit_drink=settings.survival.exit_drink,
+            hostile_radius=settings.survival.hostile_radius,
             max_consecutive_failures=(
                 settings.survival.max_consecutive_failures
             ),

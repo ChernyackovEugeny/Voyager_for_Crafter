@@ -88,12 +88,32 @@ def _candidate_matches_task(task, candidate) -> bool:
     skill_name = candidate.skill.name
     achievement_key = getattr(task, "achievement_key", None)
     if achievement_key is not None:
-        return skill_name == achievement_key or skill_name.startswith(
-            f"{achievement_key}_v"
-        )
+        return _skill_name_matches_base(skill_name, achievement_key)
 
     task_name = getattr(task, "name", "")
     if task_name == "survive":
-        return skill_name == "survive" or skill_name.startswith("survive_v")
+        return _skill_name_matches_base(skill_name, "survive")
 
-    return True
+    for condition in getattr(task, "completion_conditions", ()) or ():
+        key = getattr(condition, "key", "")
+        if isinstance(key, str) and key.startswith("achievements."):
+            achievement_key = key.split(".", 1)[1]
+            return _skill_name_matches_base(skill_name, achievement_key)
+
+    return _skill_name_matches_base(skill_name, str(task_name).replace("-", "_"))
+
+
+def _skill_name_matches_base(skill_name: str | None, base: str | None) -> bool:
+    if not skill_name or not base:
+        return False
+    if skill_name == base or skill_name.startswith(f"{base}_v"):
+        return True
+    root = _skill_root(skill_name)
+    return base.startswith(f"{root}_")
+
+
+def _skill_root(skill_name: str) -> str:
+    head, sep, tail = skill_name.rpartition("_v")
+    if sep and tail.isdigit():
+        return head
+    return skill_name

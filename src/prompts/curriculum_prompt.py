@@ -33,10 +33,9 @@ Completion-condition DSL for non-achievement sub-tasks:
 - Conditions are ANDed together.
 
 Task rules:
-- Survival foundation comes first: secure water, secure food, and build a small
-  remembered home/base before optimizing for the achievement graph.
-- Treat achievements as secondary until the agent has reliable drink, food, and
-  a placed crafting table/home base.
+- Survival is handled before this prompt as an emergency interrupt when stats
+  are critical or a hostile is close. Do not propose generic survive/foundation
+  tasks here.
 - Prefer achievements listed in Available next achievements.
 - If a high-level achievement keeps failing, propose a smaller non-achievement sub-task using conditions.
 - Never propose a non-achievement sub-task whose conditions are already satisfied in Current state.

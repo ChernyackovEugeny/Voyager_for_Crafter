@@ -8,7 +8,13 @@ import time
 import traceback as tb_mod
 from typing import Any, Callable
 
-from environment.danger import hostile_visible
+import crafter.constants as _C
+
+from environment.danger import (
+    hostile_within,
+    nearest_hostile_distance,
+    visible_hostiles,
+)
 from environment.render_viewer import RenderViewer
 
 logger = logging.getLogger(__name__)
@@ -31,6 +37,7 @@ class ExecutionResult:
     total_reward: float
     final_state: dict[str, Any]
     achievements_gained: list[str] = field(default_factory=list)
+    state_history: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
 
 
@@ -86,6 +93,7 @@ class Executor:
         stagnant_steps = 0
         steps = 0
         total_reward = 0.0
+        state_history: list[dict[str, Any]] = []
 
         try:
             gen = skill(state)
@@ -98,6 +106,12 @@ class Executor:
                 info = dict(info)
                 state = {"obs": obs, "info": info}
                 self._render_frame(env)
+                self._append_state_history(
+                    state_history,
+                    step=steps,
+                    action=action,
+                    info=info,
+                )
 
                 if done:
                     return self._make_result(
@@ -107,11 +121,12 @@ class Executor:
                         obs,
                         info,
                         achievements_before,
+                        state_history=state_history,
                     )
                 if (
                     danger_interrupt_enabled
                     and steps >= self._min_steps_before_danger_interrupt
-                    and hostile_visible(info)
+                    and hostile_within(info, 3)
                 ):
                     logger.info("executor: danger interrupt at step %d", steps)
                     return self._make_result(
@@ -121,6 +136,7 @@ class Executor:
                         obs,
                         info,
                         achievements_before,
+                        state_history=state_history,
                     )
                 if (
                     health_interrupt_enabled
@@ -135,6 +151,7 @@ class Executor:
                         obs,
                         info,
                         achievements_before,
+                        state_history=state_history,
                     )
                 progress = self._progress_signature(
                     info,
@@ -158,6 +175,7 @@ class Executor:
                         obs,
                         info,
                         achievements_before,
+                        state_history=state_history,
                     )
                 if steps >= self._max_steps:
                     logger.info("executor: timeout at step %d", steps)
@@ -168,6 +186,7 @@ class Executor:
                         obs,
                         info,
                         achievements_before,
+                        state_history=state_history,
                     )
 
                 action = gen.send(state)
@@ -180,6 +199,7 @@ class Executor:
                 obs,
                 info,
                 achievements_before,
+                state_history=state_history,
             )
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}\n{tb_mod.format_exc()}"
@@ -192,6 +212,7 @@ class Executor:
                 achievements_gained=self._diff(
                     achievements_before, self._unlocked(info)
                 ),
+                state_history=list(state_history),
                 error=err,
             )
 
@@ -203,6 +224,7 @@ class Executor:
         obs: Any,
         info: dict[str, Any],
         achievements_before: set[str],
+        state_history: list[dict[str, Any]] | None = None,
     ) -> ExecutionResult:
         return ExecutionResult(
             reason=reason,
@@ -212,6 +234,7 @@ class Executor:
             achievements_gained=self._diff(
                 achievements_before, self._unlocked(info)
             ),
+            state_history=list(state_history or []),
         )
 
     @staticmethod
@@ -271,6 +294,57 @@ class Executor:
             (key, int(inventory.get(key, 0) or 0))
             for key in ("health", "food", "drink", "energy")
         )
+
+    @classmethod
+    def _append_state_history(
+        cls,
+        history: list[dict[str, Any]],
+        *,
+        step: int,
+        action: int,
+        info: dict[str, Any],
+        limit: int = 20,
+    ) -> None:
+        inventory = info.get("inventory", {}) or {}
+        achievements = info.get("achievements", {}) or {}
+        history.append({
+            "step": int(step),
+            "action": cls._action_name(action),
+            "player_pos": cls._position(info),
+            "inventory": {
+                key: int(inventory.get(key, 0) or 0)
+                for key in (
+                    "health",
+                    "food",
+                    "drink",
+                    "energy",
+                    "wood",
+                    "stone",
+                    "wood_pickaxe",
+                    "stone_pickaxe",
+                    "iron_pickaxe",
+                    "wood_sword",
+                    "stone_sword",
+                    "iron_sword",
+                )
+                if key in inventory
+            },
+            "achievements": tuple(
+                sorted(key for key, value in achievements.items() if value)
+            ),
+            "visible_hostiles": visible_hostiles(info),
+            "nearest_hostile_distance": nearest_hostile_distance(info),
+            "emergency_hostile": hostile_within(info, 3),
+        })
+        if len(history) > limit:
+            del history[: len(history) - limit]
+
+    @staticmethod
+    def _action_name(action: int) -> str:
+        try:
+            return str(_C.actions[int(action)])
+        except Exception:
+            return str(action)
 
     def _render_frame(self, env) -> None:
         if not self._render:

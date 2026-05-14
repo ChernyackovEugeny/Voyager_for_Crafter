@@ -115,6 +115,38 @@ class InferenceStrategyTests(unittest.TestCase):
 
         self.assertIsNone(source)
 
+    def test_non_achievement_task_does_not_reuse_different_skill(self):
+        strategy = InferenceStrategy(reuse_threshold=0.85)
+
+        source = strategy.acquire_skill(
+            task=Task(
+                name="collect-stone",
+                description="Mine a stone block to obtain more stone.",
+                achievement_key=None,
+            ),
+            obs=None,
+            info={},
+            candidates=[_candidate(0.95, name="place_stone_v2")],
+        )
+
+        self.assertIsNone(source)
+
+    def test_non_achievement_variant_can_reuse_base_skill(self):
+        strategy = InferenceStrategy(reuse_threshold=0.85)
+
+        source = strategy.acquire_skill(
+            task=Task(
+                name="collect-stone-for-furnace",
+                description="Mine more stone to have enough to place a furnace.",
+                achievement_key=None,
+            ),
+            obs=None,
+            info={},
+            candidates=[_candidate(0.95, name="collect_stone_v2")],
+        )
+
+        self.assertEqual(source.reused_name, "collect_stone_v2")
+
     def test_no_candidates_returns_none(self):
         strategy = InferenceStrategy(reuse_threshold=0.85)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -8,6 +9,7 @@ from agent.executor import Executor, InterruptReason
 from agent.memory import SpatialMemory
 from analytics.log_utils import log_episode, log_llm_call_ok, log_task_attempt
 from environment.captioner import caption
+from skills import primitives
 from skills.runner import SkillLoadError, SkillRuntime, load_skill
 
 logger = logging.getLogger(__name__)
@@ -84,7 +86,8 @@ class Agent:
                 episode_reward += self._last_result.total_reward
             task_complete = self.curriculum.is_task_complete(task, state["info"])
             if skipped:
-                skipped_task_keys.add(task.skip_key)
+                if task.name != "survive":
+                    skipped_task_keys.add(task.skip_key)
             if not task_complete:
                 if self._failed_reused_skill is not None:
                     blocked_reuse.setdefault(task.skip_key, set()).add(
@@ -99,7 +102,8 @@ class Agent:
                     else self.max_consecutive_task_failures
                 )
                 if consecutive_failures[task.skip_key] >= limit:
-                    skipped_task_keys.add(task.skip_key)
+                    if task.name != "survive":
+                        skipped_task_keys.add(task.skip_key)
                     logger.info(
                         "[Agent] task skipped after %d consecutive failures: %s",
                         consecutive_failures[task.skip_key],
@@ -154,6 +158,18 @@ class Agent:
         blocked_skill_names: set[str] | frozenset[str] = frozenset(),
     ) -> tuple[bool, dict[str, Any], bool]:
         """Run one task attempt and return (episode_done, final_state, skipped)."""
+        if self.curriculum.is_task_complete(task, state["info"]):
+            logger.info(
+                "[Agent] pre-run reject: task already complete at start: %s",
+                task.name,
+            )
+            failure_state = dict(state)
+            failure_state["failure_reason"] = "pre_complete_task_mismatch"
+            failure_state["executor_steps"] = 0
+            failure_state["executor_reason"] = "pre_complete_task_mismatch"
+            self.curriculum.record_task_failed(task, failure_state)
+            return False, state, True
+
         candidates = self.skill_manager.retrieve(task.description)
         self._failed_reused_skill = None
         if blocked_skill_names:
@@ -190,14 +206,21 @@ class Agent:
         self._log_source_llm_call(source)
 
         try:
-            extra_skills = source.extra_skills or tuple(
+            retrieved_extra_skills = source.extra_skills or tuple(
                 (candidate.skill.name, candidate.skill.code)
                 for candidate in candidates
+            )
+            extra_skills = self._dependency_skills(
+                source.code,
+                retrieved_extra_skills,
+                current_name=source.reused_name,
             )
             function_name, skill_func = load_skill(
                 source.code,
                 runtime=SkillRuntime(memory=self.memory),
                 extra_skills=list(extra_skills),
+                allowed_skill_names=set(source.allowed_skill_names)
+                | {name for name, _ in extra_skills},
             )
         except SkillLoadError as exc:
             logger.warning("[Agent] load failed: %s | %s", task.name, exc)
@@ -234,11 +257,28 @@ class Agent:
             task,
             final_state["info"],
         )
-        if result.reason == InterruptReason.ERROR:
+        if result.reason in {
+            InterruptReason.ERROR,
+            InterruptReason.DANGER_VISIBLE,
+            InterruptReason.HEALTH_LOW,
+            InterruptReason.EPISODE_DONE,
+        }:
             task_complete = False
-        if source.generated and result.steps == 0:
+        if (
+            source.generated
+            and result.reason == InterruptReason.COMPLETED
+            and not result.achievements_gained
+            and result.total_reward <= 0
+        ):
             logger.info(
-                "[Agent] generated skill rejected: no actions yielded for %s",
+                "[Agent] generated skill rejected: no reward or achievement "
+                "progress for %s",
+                task.name,
+            )
+            task_complete = False
+        if result.steps == 0:
+            logger.info(
+                "[Agent] skill rejected: no actions yielded for %s",
                 task.name,
             )
             task_complete = False
@@ -264,6 +304,7 @@ class Agent:
             failure_state["executor_steps"] = result.steps
             failure_state["executor_reason"] = result.reason.value
             failure_state["initial_info"] = state.get("info", {})
+            failure_state["state_history"] = result.state_history
             call = self.strategy.on_task_failed(
                 task=task,
                 source=source,
@@ -382,6 +423,83 @@ class Agent:
             self._log_llm_call(payload, call_type=str(call_type))
             return
         self._log_llm_call(call, call_type=default_call_type)
+
+    def _dependency_skills(
+        self,
+        code: str,
+        extra_skills: tuple[tuple[str, str], ...],
+        *,
+        current_name: str | None,
+    ) -> tuple[tuple[str, str], ...]:
+        deps: dict[str, str] = {
+            name: skill_code
+            for name, skill_code in extra_skills
+            if name != current_name
+        }
+        expanded: set[str] = set()
+        queue = list(self._referenced_skill_names(code))
+        while queue:
+            name = queue.pop(0)
+            if name == current_name or name in expanded:
+                continue
+            skill_code = deps.get(name)
+            if skill_code is None:
+                skill = self.skill_manager.get(name)
+                if skill is None:
+                    continue
+                skill_code = skill.code
+                deps[name] = skill_code
+            expanded.add(name)
+            queue.extend(
+                ref
+                for ref in self._referenced_skill_names(skill_code)
+                if ref not in expanded and ref != current_name
+            )
+        return tuple(deps.items())
+
+    @staticmethod
+    def _referenced_skill_names(code: str) -> set[str]:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return set()
+        defined = {
+            node.name
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        ignored = (
+            primitives.PRIMITIVE_NAMES
+            | primitives.MEMORY_PRIMITIVE_NAMES
+            | {
+                "state",
+                "current",
+                "inv",
+                "range",
+                "len",
+                "int",
+                "str",
+                "bool",
+                "tuple",
+                "list",
+                "dict",
+                "set",
+                "min",
+                "max",
+                "abs",
+                "any",
+                "all",
+                "sorted",
+                "enumerate",
+            }
+        )
+        return {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+            and node.id not in defined
+            and node.id not in ignored
+        }
 
     def _log_task_attempt(
         self,

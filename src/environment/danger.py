@@ -13,6 +13,26 @@ HOSTILE_IDS: frozenset[int] = frozenset(
 )
 
 
+def nearest_hostile_distance(info: dict) -> int | None:
+    """Return the nearest visible hostile distance from the player-centered view."""
+    semantic, offset = visible_semantic_window(info)
+    if semantic.size == 0:
+        return None
+    coords = np.argwhere(np.isin(semantic, tuple(HOSTILE_IDS)))
+    if coords.size == 0:
+        return None
+    px, py = info.get("player_pos", (0, 0))
+    center = np.array([int(px) - offset[0], int(py) - offset[1]])
+    distances = np.max(np.abs(coords - center), axis=1)
+    return int(np.min(distances))
+
+
+def hostile_within(info: dict, radius: int) -> bool:
+    """True when a hostile is visible within Chebyshev radius from the player."""
+    distance = nearest_hostile_distance(info)
+    return distance is not None and distance <= radius
+
+
 def visible_hostiles(info: dict) -> tuple[str, ...]:
     """Return hostile entities currently inside the visible semantic window."""
     semantic, _ = visible_semantic_window(info)

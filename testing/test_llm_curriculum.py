@@ -186,7 +186,7 @@ class LLMCurriculumTests(unittest.TestCase):
         curriculum = LLMCurriculum(client=client, max_retries=0)
 
         task = curriculum.propose_task(
-            _info(inventory={"health": 6, "food": 9, "drink": 9})
+            _info(inventory={"health": 4, "food": 9, "drink": 9})
         )
 
         self.assertEqual(task.name, "survive")

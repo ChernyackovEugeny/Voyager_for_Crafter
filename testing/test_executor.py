@@ -389,6 +389,23 @@ class TestExecutor(unittest.TestCase):
         result = ex.run(skill, env, state(inventory={"energy": 1}), survival_progress_enabled=True)
         self.assertEqual(result.reason, InterruptReason.TIMEOUT)
 
+    def test_state_history_records_recent_actions_and_stats(self):
+        ex = Executor(max_steps_per_skill=2, health_threshold=4)
+        env = FakeEnv([
+            ("obs", 0.0, False, False, state(inventory={"drink": 4})["info"]),
+            ("obs", 0.0, False, False, state(inventory={"drink": 5})["info"]),
+        ])
+
+        def skill(current):
+            current = yield 5
+            current = yield 0
+            current = yield 0
+
+        result = ex.run(skill, env, state(inventory={"drink": 3}), survival_progress_enabled=True)
+
+        self.assertEqual([event["action"] for event in result.state_history], ["do", "noop"])
+        self.assertEqual(result.state_history[-1]["inventory"]["drink"], 5)
+
     def test_danger_interrupts_when_enabled(self):
         ex = Executor(max_steps_per_skill=50, health_threshold=4)
         current = state_with_visible("zombie")

@@ -50,50 +50,54 @@ class TechTreeIntegrityTests(unittest.TestCase):
 
 
 class HardcodedCurriculumTests(unittest.TestCase):
-    def test_first_task_secures_water(self):
+    def test_first_task_collects_wood(self):
         curriculum = HardcodedCurriculum()
 
         task = curriculum.propose_task(_info({}))
 
         self.assertIsNotNone(task)
-        self.assertEqual(task.achievement_key, "collect_drink")
-        self.assertEqual(task.name, "secure-water")
-
-    def test_food_is_prioritized_after_water(self):
-        curriculum = HardcodedCurriculum()
-
-        task = curriculum.propose_task(_info({"collect_drink": 1}))
-
-        self.assertEqual(task.achievement_key, "eat_cow")
-        self.assertEqual(task.name, "secure-food")
-
-    def test_collect_wood_is_prioritized_before_shelter(self):
-        curriculum = HardcodedCurriculum()
-
-        task = curriculum.propose_task(
-            _info({"collect_drink": 1, "eat_cow": 1})
-        )
-
         self.assertEqual(task.achievement_key, "collect_wood")
         self.assertEqual(task.name, "collect-wood")
 
-    def test_shelter_is_prioritized_after_water_food_and_wood(self):
+    def test_drink_follows_wood_in_progress_order(self):
+        curriculum = HardcodedCurriculum()
+
+        task = curriculum.propose_task(_info({"collect_wood": 1}))
+
+        self.assertEqual(task.achievement_key, "collect_drink")
+        self.assertEqual(task.name, "collect-drink")
+
+    def test_food_follows_water_in_progress_order(self):
         curriculum = HardcodedCurriculum()
 
         task = curriculum.propose_task(
-            _info({"collect_drink": 1, "eat_cow": 1, "collect_wood": 1})
+            _info({"collect_wood": 1, "collect_drink": 1})
         )
 
-        self.assertIsNone(task.achievement_key)
-        self.assertEqual(task.name, "build-shelter")
-        self.assertEqual(task.completion_conditions[0].key, "achievements.place_table")
+        self.assertEqual(task.achievement_key, "eat_cow")
+        self.assertEqual(task.name, "eat-cow")
+
+    def test_place_table_is_progress_task_after_prerequisites(self):
+        curriculum = HardcodedCurriculum()
+
+        task = curriculum.propose_task(
+            _info({
+                "collect_wood": 1,
+                "collect_drink": 1,
+                "eat_cow": 1,
+                "collect_sapling": 1,
+            })
+        )
+
+        self.assertEqual(task.achievement_key, "place_table")
+        self.assertEqual(task.name, "place-table")
 
     def test_skip_excludes_task_for_current_proposal(self):
         curriculum = HardcodedCurriculum()
 
         task = curriculum.propose_task(_info({}), skip={"collect_drink"})
 
-        self.assertEqual(task.achievement_key, "eat_cow")
+        self.assertEqual(task.achievement_key, "collect_wood")
 
     def test_skips_completed_tasks(self):
         curriculum = HardcodedCurriculum()
@@ -137,7 +141,7 @@ class HardcodedCurriculumTests(unittest.TestCase):
 
         self.assertFalse(curriculum.is_task_complete(task, _info({})))
         self.assertTrue(
-            curriculum.is_task_complete(task, _info({"collect_drink": 1}))
+            curriculum.is_task_complete(task, _info({"collect_wood": 1}))
         )
 
     def test_record_failed_does_not_change_proposal(self):
@@ -153,7 +157,7 @@ class HardcodedCurriculumTests(unittest.TestCase):
     def test_survive_task_is_proposed_before_achievements_when_in_danger(self):
         curriculum = HardcodedCurriculum()
 
-        task = curriculum.propose_task(_info({}, {"health": 6, "food": 9, "drink": 9}))
+        task = curriculum.propose_task(_info({}, {"health": 4, "food": 9, "drink": 9}))
 
         self.assertEqual(task.name, "survive")
         self.assertIsNone(task.achievement_key)
@@ -173,6 +177,37 @@ class HardcodedCurriculumTests(unittest.TestCase):
 
         self.assertEqual(task.name, "survive")
 
+    def test_far_hostile_does_not_trigger_survive(self):
+        curriculum = HardcodedCurriculum()
+        semantic = np.zeros((64, 64), dtype=int)
+        semantic[14, 14] = NAME_TO_ID["zombie"]
+        info = _info(
+            {},
+            {"health": 9, "food": 9, "drink": 9},
+        )
+        info.update({"semantic": semantic, "player_pos": (10, 10), "view_size": (9, 9)})
+
+        task = curriculum.propose_task(info)
+
+        self.assertEqual(task.achievement_key, "collect_wood")
+
+    def test_inventory_gates_tool_required_mining_tasks(self):
+        curriculum = HardcodedCurriculum()
+        achievements = {
+            "collect_wood": 1,
+            "collect_drink": 1,
+            "eat_cow": 1,
+            "collect_sapling": 1,
+            "place_table": 1,
+            "make_wood_pickaxe": 1,
+        }
+
+        blocked = curriculum.propose_task(_info(achievements, {"wood_pickaxe": 0}))
+        available = curriculum.propose_task(_info(achievements, {"wood_pickaxe": 1}))
+
+        self.assertNotEqual(blocked.achievement_key, "collect_stone")
+        self.assertEqual(available.achievement_key, "collect_stone")
+
     def test_hostile_visible_respects_survive_skip(self):
         curriculum = HardcodedCurriculum()
         semantic = np.zeros((64, 64), dtype=int)
@@ -183,7 +218,7 @@ class HardcodedCurriculumTests(unittest.TestCase):
         task = curriculum.propose_task(info, skip={"survive"})
 
         self.assertNotEqual(task.name, "survive")
-        self.assertEqual(task.achievement_key, "collect_drink")
+        self.assertEqual(task.achievement_key, "collect_wood")
 
     def test_survive_not_complete_while_hostile_visible(self):
         curriculum = HardcodedCurriculum()
@@ -199,11 +234,11 @@ class HardcodedCurriculumTests(unittest.TestCase):
         curriculum = HardcodedCurriculum()
 
         task = curriculum.propose_task(
-            _info({}, {"health": 6, "food": 9, "drink": 9}),
+            _info({}, {"health": 4, "food": 9, "drink": 9}),
             skip={"survive"},
         )
 
-        self.assertEqual(task.achievement_key, "collect_drink")
+        self.assertEqual(task.achievement_key, "collect_wood")
 
     def test_survive_complete_requires_exit_thresholds(self):
         curriculum = HardcodedCurriculum(
@@ -233,7 +268,7 @@ class HardcodedCurriculumTests(unittest.TestCase):
             )
         )
 
-    def test_survival_hysteresis_keeps_survive_until_recovered(self):
+    def test_survival_emergency_exits_to_progress_when_not_in_danger(self):
         curriculum = HardcodedCurriculum(
             survival=SurvivalSettings(
                 enter_health=6,
@@ -256,8 +291,8 @@ class HardcodedCurriculumTests(unittest.TestCase):
         )
 
         self.assertEqual(danger_task.name, "survive")
-        self.assertEqual(middle_task.achievement_key, "collect_drink")
-        self.assertEqual(recovered_task.achievement_key, "collect_drink")
+        self.assertEqual(middle_task.achievement_key, "collect_wood")
+        self.assertEqual(recovered_task.achievement_key, "collect_wood")
 
 
 if __name__ == "__main__":

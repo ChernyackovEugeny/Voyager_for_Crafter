@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from agent.bootstrap import BOOTSTRAP_CODE
 from agent.strategies import AgentStrategy, SkillSource
 from environment.captioner import caption
 from llm.reflection import FailureContext
@@ -32,7 +33,6 @@ class TrainingStrategy(AgentStrategy):
         reuse_threshold: float,
         reflection=None,
         reflection_enabled: bool = False,
-        max_reflections_per_skill: int = 3,
         max_fix_attempts: int = 3,
         skill_validator=None,
         min_reflection_steps: int = 3,
@@ -43,7 +43,6 @@ class TrainingStrategy(AgentStrategy):
         self._reuse_threshold = reuse_threshold
         self._reflection = reflection
         self._reflection_enabled = reflection_enabled
-        self._max_reflections_per_skill = max_reflections_per_skill
         self._max_fix_attempts = max_fix_attempts
         self._skill_validator = skill_validator
         self._min_reflection_steps = min_reflection_steps
@@ -69,10 +68,10 @@ class TrainingStrategy(AgentStrategy):
             logger.info("[Agent] retry fixed generated skill for %s", task.name)
             return pending_fixed
 
-        extra_skills = tuple(
+        extra_skills = self._with_bootstrap_fallbacks(tuple(
             (candidate.skill.name, candidate.skill.code)
             for candidate in candidates
-        )
+        ))
         allowed_skill_names = frozenset(
             candidate.skill.name for candidate in candidates
         )
@@ -124,9 +123,13 @@ class TrainingStrategy(AgentStrategy):
         if source.reused_name is not None:
             logger.info("[Agent] metric: record_success(%s)", source.reused_name)
             skill_manager.record_success(source.reused_name)
+            if task.name == "survive":
+                self._update_survival_score(skill_manager, source.reused_name, 1.0)
             return
 
-        self._save_new_skill(task, source.code, skill_manager)
+        saved_name = self._save_new_skill(task, source.code, skill_manager)
+        if task.name == "survive" and saved_name is not None:
+            self._update_survival_score(skill_manager, saved_name, 1.0)
 
     def on_task_failed(
         self,
@@ -142,6 +145,13 @@ class TrainingStrategy(AgentStrategy):
         if source.reused_name is not None:
             logger.info("[Agent] metric: record_failure(%s)", source.reused_name)
             skill_manager.record_failure(source.reused_name)
+            score = self._survival_score(task=task, state=state)
+            if score is not None:
+                self._update_survival_score(
+                    skill_manager,
+                    source.reused_name,
+                    score,
+                )
             fixed = self._fix_reused_technical_error(
                 task=task,
                 source=source,
@@ -172,7 +182,10 @@ class TrainingStrategy(AgentStrategy):
                 "[Agent] survival partial progress: %s | saving generated skill",
                 partial,
             )
-            self._save_new_skill(task, source.code, skill_manager)
+            saved_name = self._save_new_skill(task, source.code, skill_manager)
+            score = self._survival_score(task=task, state=state)
+            if saved_name is not None and score is not None:
+                self._update_survival_score(skill_manager, saved_name, score)
         self._last_codegen_failure[task.name] = self._failure_memory(source, state)
         return None
 
@@ -199,7 +212,7 @@ class TrainingStrategy(AgentStrategy):
             return candidate
         return None
 
-    def _save_new_skill(self, task, code: str, skill_manager) -> None:
+    def _save_new_skill(self, task, code: str, skill_manager) -> str | None:
         base = getattr(task, "achievement_key", None) or task.name.replace("-", "_")
         name = self._unique_skill_name(base, skill_manager)
         result = skill_manager.save(name=name, code=code, task=task.description)
@@ -207,7 +220,27 @@ class TrainingStrategy(AgentStrategy):
             logger.info("[Agent] save: %s | outcome=ok", name)
             logger.info("[Agent] metric: record_success(%s)", name)
             skill_manager.record_success(name)
+            return name
         if result.outcome == "duplicate" and result.similar_to is not None:
+            if not _skill_name_matches_base(result.similar_to, base):
+                logger.info(
+                    "[Agent] save: %s | duplicate %s incompatible with task; "
+                    "saving without dedup",
+                    name,
+                    result.similar_to,
+                )
+                retry = skill_manager.save(
+                    name=name,
+                    code=code,
+                    task=task.description,
+                    deduplicate=False,
+                )
+                if retry.outcome == "ok":
+                    logger.info("[Agent] save: %s | outcome=ok", name)
+                    logger.info("[Agent] metric: record_success(%s)", name)
+                    skill_manager.record_success(name)
+                    return name
+                return None
             logger.info(
                 "[Agent] save: %s | outcome=duplicate | similar_to=%s | sim=%.3f",
                 name,
@@ -216,6 +249,8 @@ class TrainingStrategy(AgentStrategy):
             )
             logger.info("[Agent] metric: record_success(%s)", result.similar_to)
             skill_manager.record_success(result.similar_to)
+            return result.similar_to
+        return None
 
     def _compile_generated_skill(
         self,
@@ -332,6 +367,15 @@ class TrainingStrategy(AgentStrategy):
                 self._skill_validator(code, allowed_skill_names=allowed_skill_names)
             except TypeError:
                 self._skill_validator(code)
+
+    @staticmethod
+    def _with_bootstrap_fallbacks(
+        extra_skills: tuple[tuple[str, str], ...],
+    ) -> tuple[tuple[str, str], ...]:
+        merged = dict(extra_skills)
+        for name, code in BOOTSTRAP_CODE.items():
+            merged.setdefault(name, code)
+        return tuple(merged.items())
 
     def _fix_generated_technical_error(self, *, task, source, state):
         if not self._is_technical_error(state):
@@ -493,6 +537,65 @@ class TrainingStrategy(AgentStrategy):
                 f"Achievements: {unlocked}"
             )
 
+    def _survival_score(self, *, task, state: dict) -> float | None:
+        if getattr(task, "name", None) != "survive":
+            return None
+        steps = int(state.get("executor_steps", 0) or 0)
+        if steps <= 0:
+            return 0.0
+        initial_inventory = (state.get("initial_info", {}) or {}).get(
+            "inventory", {}
+        ) or {}
+        final_inventory = (state.get("info", {}) or {}).get("inventory", {}) or {}
+        final_health = int(final_inventory.get("health", 0) or 0)
+
+        score = min(0.45, steps / 220.0 * 0.45)
+        for key in ("health", "food", "drink", "energy"):
+            before = int(initial_inventory.get(key, 0) or 0)
+            after = int(final_inventory.get(key, 0) or 0)
+            if after > before:
+                score += min(0.12, (after - before) * 0.03)
+            elif after < before:
+                score -= min(0.08, (before - after) * 0.02)
+
+        history = state.get("state_history") or []
+        actions = [
+            str(event.get("action") or "")
+            for event in history
+            if isinstance(event, dict)
+        ]
+        if "place_stone" in actions:
+            score += 0.18
+        if "place_table" in actions:
+            score += 0.10
+        if any(
+            str(event.get("action") or "") == "do"
+            and (
+                event.get("emergency_hostile")
+                or event.get("nearest_hostile_distance") is not None
+            )
+            for event in history
+            if isinstance(event, dict)
+        ):
+            score += 0.12
+        if final_health <= 0:
+            score = min(score, 0.20)
+        if str(state.get("failure_reason") or "") == "episode_done" and final_health <= 0:
+            score -= 0.10
+        return max(0.0, min(1.0, score))
+
+    @staticmethod
+    def _update_survival_score(skill_manager, name: str | None, score: float) -> None:
+        if name is None:
+            return
+        update = getattr(skill_manager, "update_episodic_score", None)
+        if update is None:
+            return
+        try:
+            update(name, score)
+        except Exception:
+            logger.debug("survival score update skipped for %s", name, exc_info=True)
+
     def _reflect_reused_skill(self, *, task, source, state, skill_manager):
         if not self._reflection_enabled or self._reflection is None:
             return None
@@ -522,12 +625,6 @@ class TrainingStrategy(AgentStrategy):
             return None
         if skill.success_count <= 0 and not is_survival_controller:
             logger.info("[Agent] reflection skipped: skill has no prior success")
-            return None
-        if skill.reflected_count >= self._max_reflections_per_skill:
-            logger.info(
-                "[Agent] reflection skipped: max reflections reached for %s",
-                skill.name,
-            )
             return None
         if self._missing_prerequisites(task, state):
             logger.info(
@@ -701,7 +798,30 @@ def _candidate_matches_task(task, candidate) -> bool:
     if task_name == "survive":
         return _is_survival_controller_name(skill_name)
 
-    return True
+    for condition in getattr(task, "completion_conditions", ()) or ():
+        key = getattr(condition, "key", "")
+        if isinstance(key, str) and key.startswith("achievements."):
+            achievement_key = key.split(".", 1)[1]
+            return _skill_name_matches_base(skill_name, achievement_key)
+
+    base = str(task_name).replace("-", "_")
+    return _skill_name_matches_base(skill_name, base)
+
+
+def _skill_name_matches_base(skill_name: str | None, base: str | None) -> bool:
+    if not skill_name or not base:
+        return False
+    if skill_name == base or skill_name.startswith(f"{base}_v"):
+        return True
+    root = _skill_root(skill_name)
+    return base.startswith(f"{root}_")
+
+
+def _skill_root(skill_name: str) -> str:
+    head, sep, tail = skill_name.rpartition("_v")
+    if sep and tail.isdigit():
+        return head
+    return skill_name
 
 
 def _is_survival_controller_name(skill_name: str | None) -> bool:

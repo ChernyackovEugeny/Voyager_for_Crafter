@@ -51,7 +51,6 @@ class LLMConfig(_BaseGroup):
     curriculum_timeout_s: float = 30.0
     curriculum_max_failures_in_context: int = 5
     curriculum_max_retries: int = 1
-    max_reflections_per_skill: int = 3
     max_fix_attempts: int = 3
     request_timeout_s: float = 60.0
 
@@ -150,12 +149,13 @@ class SurvivalConfig(_BaseGroup):
         env_prefix="SURVIVAL_", extra="ignore",
     )
 
-    enter_health: int = 7
-    enter_food: int = 6
-    enter_drink: int = 6
+    enter_health: int = 4
+    enter_food: int = 2
+    enter_drink: int = 2
     exit_health: int = 8
     exit_food: int = 6
     exit_drink: int = 6
+    hostile_radius: int = 3
     max_consecutive_failures: int = 3
 
 

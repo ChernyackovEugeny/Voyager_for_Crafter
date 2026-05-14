@@ -60,14 +60,28 @@ class FakeCurriculum:
         return calls
 
 
+class PreCompleteCurriculum(FakeCurriculum):
+    def is_task_complete(self, task, info):
+        return True
+
+
+class DslCompleteCurriculum(FakeCurriculum):
+    def is_task_complete(self, task, info):
+        return bool(info.get("achievements", {}).get("collect_wood", 0))
+
+
 class FakeSkillManager:
     def __init__(self, candidates=None):
         self.candidates = candidates or []
         self.retrieve_calls = []
+        self.records = {candidate.skill.name: candidate.skill for candidate in self.candidates}
 
     def retrieve(self, task_text):
         self.retrieve_calls.append(task_text)
         return self.candidates
+
+    def get(self, name):
+        return self.records.get(name)
 
 
 class FakeRunLogger:
@@ -116,10 +130,20 @@ class FakeStrategy:
 
 
 class FakeExecutor:
-    def __init__(self, *, complete, reason=InterruptReason.COMPLETED, steps=1):
+    def __init__(
+        self,
+        *,
+        complete,
+        reason=InterruptReason.COMPLETED,
+        steps=1,
+        total_reward=0.0,
+        achievements_gained=None,
+    ):
         self.complete = complete
         self.reason = reason
         self.steps = steps
+        self.total_reward = total_reward
+        self.achievements_gained = achievements_gained
         self.calls = []
         self.render_state_calls = 0
 
@@ -147,8 +171,13 @@ class FakeExecutor:
         return ExecutionResult(
             reason=self.reason,
             steps=self.steps,
-            total_reward=0.0,
+            total_reward=self.total_reward,
             final_state={"obs": "final_obs", "info": _state_info(achievements)},
+            achievements_gained=(
+                self.achievements_gained
+                if self.achievements_gained is not None
+                else ["collect_wood"] if self.complete else []
+            ),
         )
 
 
@@ -172,6 +201,34 @@ def _task(name="collect-wood", key="collect_wood"):
 
 def _skill_code():
     return "def collect_wood(state):\n    state = yield 0\n"
+
+
+def _survive_code():
+    return (
+        "def survive(state):\n"
+        "    state = yield from fight_isolated_zombie(state)\n"
+        "    return state\n"
+    )
+
+
+def _fight_code():
+    return "def fight_isolated_zombie(state):\n    state = yield 0\n    return state\n"
+
+
+def _collect_stone_code():
+    return (
+        "def collect_stone(state):\n"
+        "    state = yield from make_wood_pickaxe(state)\n"
+        "    return state\n"
+    )
+
+
+def _make_pickaxe_code():
+    return (
+        "def make_wood_pickaxe(state):\n"
+        "    state = yield from collect_wood(state)\n"
+        "    return state\n"
+    )
 
 
 def _llm_call():
@@ -359,6 +416,149 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(strategy.completed, [])
         self.assertEqual(strategy.failed, [("collect-wood", None)])
 
+    def test_reused_zero_step_completion_is_rejected(self):
+        strategy = FakeStrategy([
+            SkillSource(code=_skill_code(), generated=False, reused_name="collect_wood")
+        ])
+        agent = _agent(
+            strategy=strategy,
+            executor=FakeExecutor(complete=True, steps=0),
+            max_iterations=1,
+        )
+
+        agent.run()
+
+        self.assertEqual(strategy.completed, [])
+        self.assertEqual(strategy.failed, [("collect-wood", "collect_wood")])
+
+    def test_danger_interrupt_cannot_complete_task(self):
+        strategy = FakeStrategy([SkillSource(code=_skill_code(), generated=True)])
+        agent = _agent(
+            curriculum=DslCompleteCurriculum([_task()]),
+            strategy=strategy,
+            executor=FakeExecutor(
+                complete=True,
+                reason=InterruptReason.DANGER_VISIBLE,
+                steps=5,
+                total_reward=1.0,
+            ),
+            max_iterations=1,
+        )
+
+        agent.run()
+
+        self.assertEqual(strategy.completed, [])
+        self.assertEqual(strategy.failed, [("collect-wood", None)])
+
+    def test_generated_no_reward_no_achievement_completion_is_rejected(self):
+        strategy = FakeStrategy([SkillSource(code=_skill_code(), generated=True)])
+        agent = _agent(
+            curriculum=DslCompleteCurriculum([_task()]),
+            strategy=strategy,
+            executor=FakeExecutor(
+                complete=True,
+                reason=InterruptReason.COMPLETED,
+                steps=2,
+                total_reward=0.0,
+                achievements_gained=[],
+            ),
+            max_iterations=1,
+        )
+
+        agent.run()
+
+        self.assertEqual(strategy.completed, [])
+        self.assertEqual(strategy.failed, [("collect-wood", None)])
+
+    def test_pre_complete_task_is_rejected_before_skill_lookup(self):
+        curriculum = PreCompleteCurriculum([_task()])
+        manager = FakeSkillManager()
+        strategy = FakeStrategy([SkillSource(code=_skill_code(), generated=True)])
+        agent = _agent(
+            curriculum=curriculum,
+            skill_manager=manager,
+            strategy=strategy,
+            max_iterations=1,
+        )
+
+        agent.run()
+
+        self.assertEqual(manager.retrieve_calls, [])
+        self.assertEqual(strategy.completed, [])
+        self.assertEqual(strategy.failed, [])
+        self.assertEqual(curriculum.failures[0][1]["failure_reason"], "pre_complete_task_mismatch")
+
+    def test_reused_skill_loads_named_dependency_from_library(self):
+        survive = SkillRecord(
+            name="survive",
+            code=_survive_code(),
+            description="Survive.",
+        )
+        fight = SkillRecord(
+            name="fight_isolated_zombie",
+            code=_fight_code(),
+            description="Fight.",
+        )
+        manager = FakeSkillManager(candidates=[_candidate("survive", 0.9)])
+        manager.records["fight_isolated_zombie"] = fight
+        strategy = FakeStrategy([
+            SkillSource(code=survive.code, generated=False, reused_name="survive")
+        ])
+        agent = _agent(
+            curriculum=FakeCurriculum([_task("survive", None)]),
+            skill_manager=manager,
+            strategy=strategy,
+            executor=FakeExecutor(complete=True),
+            max_iterations=1,
+        )
+
+        agent.run()
+
+        self.assertEqual(len(agent.executor.calls), 1)
+        self.assertEqual(agent.executor.calls[0]["skill"].__name__, "survive")
+
+    def test_reused_skill_expands_retrieved_dependency_dependencies(self):
+        collect_stone = SkillRecord(
+            name="collect_stone",
+            code=_collect_stone_code(),
+            description="Stone.",
+        )
+        make_pickaxe = SkillRecord(
+            name="make_wood_pickaxe",
+            code=_make_pickaxe_code(),
+            description="Pickaxe.",
+        )
+        collect_wood = SkillRecord(
+            name="collect_wood",
+            code=_skill_code(),
+            description="Wood.",
+        )
+        manager = FakeSkillManager(candidates=[
+            SkillCandidate(skill=make_pickaxe, similarity=0.9),
+        ])
+        manager.records["collect_stone"] = collect_stone
+        manager.records["collect_wood"] = collect_wood
+        strategy = FakeStrategy([
+            SkillSource(
+                code=collect_stone.code,
+                generated=False,
+                reused_name="collect_stone",
+                extra_skills=(("make_wood_pickaxe", make_pickaxe.code),),
+            )
+        ])
+        agent = _agent(
+            curriculum=FakeCurriculum([_task("collect-stone", "collect_stone")]),
+            skill_manager=manager,
+            strategy=strategy,
+            executor=FakeExecutor(complete=True),
+            max_iterations=1,
+        )
+
+        agent.run()
+
+        self.assertEqual(len(agent.executor.calls), 1)
+        self.assertEqual(agent.executor.calls[0]["skill"].__name__, "collect_stone")
+
     def test_max_iterations_stops_repeated_failures(self):
         curriculum = FakeCurriculum([_task()])
         strategy = FakeStrategy([
@@ -378,7 +578,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(summary["iterations"], 3)
         self.assertEqual(len(curriculum.failures), 3)
 
-    def test_survive_failure_is_skipped_after_consecutive_limit(self):
+    def test_survive_failure_is_not_permanently_skipped(self):
         survive = _task("survive", None)
         collect = _task("collect-wood", "collect_wood")
         curriculum = FakeCurriculum([survive, collect])
@@ -398,10 +598,10 @@ class AgentTests(unittest.TestCase):
         summary = agent.run()
 
         self.assertEqual(summary["iterations"], 3)
-        self.assertIn({"survive"}, curriculum.calls)
         self.assertEqual(strategy.failed[0][0], "survive")
         self.assertEqual(strategy.failed[1][0], "survive")
-        self.assertEqual(strategy.failed[2][0], "collect-wood")
+        self.assertEqual(strategy.failed[2][0], "survive")
+        self.assertNotIn({"survive"}, curriculum.calls)
 
     def test_survive_disables_danger_interrupt_to_allow_recovery_policy(self):
         survive = _task("survive", None)

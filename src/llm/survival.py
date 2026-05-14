@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from environment.danger import hostile_visible
+from environment.danger import hostile_within
 
 
 def make_survive_task(task_cls):
@@ -24,10 +24,10 @@ def make_survive_task(task_cls):
 def is_in_danger(info: dict[str, Any], cfg) -> bool:
     inventory = info.get("inventory", {})
     return (
-        hostile_visible(info)
-        or int(inventory.get("health", 9)) <= cfg.enter_health
+        int(inventory.get("health", 9)) <= cfg.enter_health
         or int(inventory.get("food", 9)) <= cfg.enter_food
         or int(inventory.get("drink", 9)) <= cfg.enter_drink
+        or hostile_within(info, cfg.hostile_radius)
     )
 
 

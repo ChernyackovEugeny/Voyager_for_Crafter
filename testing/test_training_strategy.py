@@ -76,9 +76,15 @@ class FakeSkillManager:
         self.existing = set()
         self.records = {}
         self.code_updates = []
+        self.episodic_scores = []
 
-    def save(self, *, name, code, task):
-        self.saved.append({"name": name, "code": code, "task": task})
+    def save(self, *, name, code, task, deduplicate=True):
+        self.saved.append({
+            "name": name,
+            "code": code,
+            "task": task,
+            "deduplicate": deduplicate,
+        })
         self.existing.add(name)
         skill = SkillRecord(name=name, code=code, description=task)
         self.records[name] = skill
@@ -108,6 +114,13 @@ class FakeSkillManager:
                 "reflected_count": self.records[name].reflected_count + 1,
             }
         )
+
+    def update_episodic_score(self, name, score):
+        self.episodic_scores.append((name, score))
+        if name in self.records:
+            self.records[name] = self.records[name].model_copy(
+                update={"episodic_score": score}
+            )
 
 
 class FakeReflectionCall:
@@ -144,8 +157,18 @@ class FakeReflection:
 
 
 class DuplicateSkillManager(FakeSkillManager):
-    def save(self, *, name, code, task):
-        self.saved.append({"name": name, "code": code, "task": task})
+    def save(self, *, name, code, task, deduplicate=True):
+        self.saved.append({
+            "name": name,
+            "code": code,
+            "task": task,
+            "deduplicate": deduplicate,
+        })
+        if not deduplicate:
+            self.existing.add(name)
+            skill = SkillRecord(name=name, code=code, description=task)
+            self.records[name] = skill
+            return SaveResult(saved=True, outcome="ok", skill=skill)
         return SaveResult(
             saved=False,
             outcome="duplicate",
@@ -256,6 +279,42 @@ class TrainingStrategyTests(unittest.TestCase):
 
         self.assertTrue(source.generated)
         self.assertEqual(len(codegen.calls), 1)
+
+    def test_non_achievement_task_does_not_reuse_different_skill(self):
+        codegen = FakeCodeGen()
+        strategy = TrainingStrategy(codegen=codegen, reuse_threshold=0.85)
+
+        source = strategy.acquire_skill(
+            task=Task(
+                name="collect-stone",
+                description="Mine a stone block to obtain more stone.",
+                achievement_key=None,
+            ),
+            obs=None,
+            info=_info(),
+            candidates=[_candidate(name="place_stone_v2", similarity=0.95)],
+        )
+
+        self.assertTrue(source.generated)
+        self.assertEqual(len(codegen.calls), 1)
+
+    def test_non_achievement_variant_can_reuse_base_skill(self):
+        codegen = FakeCodeGen()
+        strategy = TrainingStrategy(codegen=codegen, reuse_threshold=0.85)
+
+        source = strategy.acquire_skill(
+            task=Task(
+                name="collect-stone-for-furnace",
+                description="Mine more stone to have enough to place a furnace.",
+                achievement_key=None,
+            ),
+            obs=None,
+            info=_info(),
+            candidates=[_candidate(name="collect_stone_v2", similarity=0.95)],
+        )
+
+        self.assertEqual(source.reused_name, "collect_stone_v2")
+        self.assertEqual(codegen.calls, [])
 
     def test_low_similarity_calls_codegen_with_retrieved_context(self):
         codegen = FakeCodeGen()
@@ -463,6 +522,33 @@ class TrainingStrategyTests(unittest.TestCase):
 
         self.assertEqual(manager.successes, ["collect_wood"])
 
+    def test_incompatible_duplicate_save_retries_without_dedup(self):
+        manager = IncompatibleDuplicateSkillManager()
+        strategy = TrainingStrategy(codegen=FakeCodeGen(), reuse_threshold=0.85)
+
+        strategy.on_task_completed(
+            task=Task(
+                name="collect-sapling",
+                description="Pick up a sapling from a grass tile.",
+                achievement_key="collect_sapling",
+            ),
+            source=strategy.acquire_skill(
+                task=Task(
+                    name="collect-sapling",
+                    description="Pick up a sapling from a grass tile.",
+                    achievement_key="collect_sapling",
+                ),
+                obs=None,
+                info=_info(),
+                candidates=[],
+            ),
+            skill_manager=manager,
+        )
+
+        self.assertEqual(manager.saved[0]["deduplicate"], True)
+        self.assertEqual(manager.saved[1]["deduplicate"], False)
+        self.assertEqual(manager.successes, ["collect_sapling"])
+
     def test_reused_failure_records_metric_and_curriculum_failure(self):
         manager = FakeSkillManager()
         curriculum = FakeCurriculum()
@@ -500,7 +586,29 @@ class TrainingStrategyTests(unittest.TestCase):
             reuse_threshold=0.85,
             reflection=reflection,
             reflection_enabled=True,
-            max_reflections_per_skill=3,
+        )
+
+
+class IncompatibleDuplicateSkillManager(DuplicateSkillManager):
+    def save(self, *, name, code, task, deduplicate=True):
+        if deduplicate:
+            self.saved.append({
+                "name": name,
+                "code": code,
+                "task": task,
+                "deduplicate": deduplicate,
+            })
+            return SaveResult(
+                saved=False,
+                outcome="duplicate",
+                similar_to="place_plant",
+                similarity=0.95,
+            )
+        return super().save(
+            name=name,
+            code=code,
+            task=task,
+            deduplicate=deduplicate,
         )
         source = strategy.acquire_skill(
             task=_task(),
@@ -559,7 +667,7 @@ class TrainingStrategyTests(unittest.TestCase):
 
         self.assertIs(call, reflection.call)
 
-    def test_reused_failure_skips_reflection_after_limit(self):
+    def test_reused_failure_reflects_even_after_many_reflections(self):
         manager = FakeSkillManager()
         manager.records["collect_wood"] = SkillRecord(
             name="collect_wood",
@@ -574,7 +682,6 @@ class TrainingStrategyTests(unittest.TestCase):
             reuse_threshold=0.85,
             reflection=reflection,
             reflection_enabled=True,
-            max_reflections_per_skill=3,
         )
         source = strategy.acquire_skill(
             task=_task(),
@@ -586,14 +693,23 @@ class TrainingStrategyTests(unittest.TestCase):
         call = strategy.on_task_failed(
             task=_task(),
             source=source,
-            state={"info": _info(), "failure_reason": "timeout"},
+            state={
+                "info": _info(),
+                "failure_reason": "timeout",
+                "executor_steps": 50,
+                "state_history": [{"step": 50, "action": "move_left"}],
+            },
             skill_manager=manager,
             curriculum=FakeCurriculum(),
         )
 
-        self.assertIsNone(call)
-        self.assertEqual(reflection.calls, [])
-        self.assertEqual(manager.code_updates, [])
+        self.assertIs(call, reflection.call)
+        self.assertEqual(len(reflection.calls), 1)
+        self.assertEqual(
+            reflection.calls[0].state_snapshot["state_history"][0]["action"],
+            "move_left",
+        )
+        self.assertEqual(manager.code_updates[0][0], "collect_wood")
 
     def test_generated_failure_does_not_save(self):
         manager = FakeSkillManager()
@@ -659,6 +775,8 @@ class TrainingStrategyTests(unittest.TestCase):
 
         self.assertEqual(manager.saved[0]["name"], "survive")
         self.assertEqual(manager.successes, ["survive"])
+        self.assertEqual(manager.episodic_scores[0][0], "survive")
+        self.assertGreater(manager.episodic_scores[0][1], 0)
         self.assertEqual(len(curriculum.failures), 1)
 
     def test_generated_survive_death_does_not_save_partial_skill(self):
@@ -791,7 +909,6 @@ class TrainingStrategyTests(unittest.TestCase):
             reuse_threshold=0.85,
             reflection=reflection,
             reflection_enabled=True,
-            max_reflections_per_skill=3,
             min_reflection_steps=3,
         )
         source = strategy.acquire_skill(

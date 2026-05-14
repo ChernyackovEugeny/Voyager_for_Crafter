@@ -325,6 +325,10 @@ run in open terrain: if inventory has stone, place stone to close a gap, block
 a direct path, or build a small barrier near home; if no stone is available but
 wood is available, placing a table can create a temporary obstacle and home
 anchor. After every placement, update state and re-check hostile visibility.
+When learned tactical skills are available, compose them rather than rewriting
+everything: `fight_isolated_zombie`, `block_with_stone`,
+`place_table_barrier`, `wait_at_home`, `restore_drink`, and `restore_food` are
+intended building blocks for a survival controller.
 Do not reflexively abandon the current plan for every hostile. If exactly one
 zombie is the visible threat, health is reasonable, and the agent has any sword,
 go adjacent with `go_to`, face it, and use `do_action()` several times to kill
